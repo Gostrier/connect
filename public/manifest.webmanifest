@@ -1,0 +1,17 @@
+{
+  "name": "CampusConnect",
+  "short_name": "CampusConnect",
+  "description": "Discover events and connect with your campus community.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f7fb",
+  "theme_color": "#102a4b",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
