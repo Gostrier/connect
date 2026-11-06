@@ -219,8 +219,10 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
   onClose: () => void;
   onSuccess: (account: Account) => void;
 }) {
+  const interestOptions = ['Technology', 'Business', 'Sports', 'Leadership', 'Innovation', 'Entertainment'];
   const [mode, setMode] = useState(initialMode);
   const [form, setForm] = useState({ displayName: '', email: '', faculty: '', course: '', registrationNo: '', password: '', confirmPassword: '' });
+  const [interests, setInterests] = useState<string[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -232,7 +234,7 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
       const path = mode === 'login' ? '/auth/login' : '/auth/signup';
       const payload = mode === 'login'
         ? { email: form.email, password: form.password }
-        : form;
+        : { ...form, interests };
       const result = await api<{ account: Account }>(path, { method: 'POST', body: JSON.stringify(payload) });
       onSuccess(result.account);
     } catch (reason) {
@@ -273,6 +275,7 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
             <label>Registration No
               <input required minLength={2} maxLength={40} value={form.registrationNo} onChange={(event) => setForm({ ...form, registrationNo: event.target.value })} placeholder="e.g. SIT/2024/001" autoComplete="off" />
             </label>
+            <fieldset className="auth-interest-fieldset"><legend>Interests <span>(select all that apply)</span></legend><div className="chip-select-list">{interestOptions.map((interest) => <button key={interest} type="button" className={`select-chip ${interests.includes(interest) ? 'selected' : ''}`} aria-pressed={interests.includes(interest)} onClick={() => setInterests((current) => current.includes(interest) ? current.filter((item) => item !== interest) : [...current, interest])}>{interests.includes(interest) && <Check size={13} />}{interest}</button>)}</div><small>We’ll use these to recommend events and notify you about events that may interest you.</small></fieldset>
           </>}
           <label>Password
             <input required minLength={mode === 'signup' ? 10 : 1} type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={mode === 'signup' ? 'At least 10 characters' : 'Enter your password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />

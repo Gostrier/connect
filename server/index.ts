@@ -221,6 +221,15 @@ function notifyEventRegistrants(eventId: string, kind: string, message: string):
   }
 }
 
+const interestCategories: Record<string, string[]> = {
+  Technology: ['Academic & Research'],
+  Business: ['Career & Networking'],
+  Sports: ['Sports & Wellness'],
+  Leadership: ['Career & Networking', 'Community Service'],
+  Innovation: ['Academic & Research', 'Career & Networking'],
+  Entertainment: ['Arts & Culture', 'Clubs & Social'],
+};
+
 function notifyStudentsAboutRecommendedEvent(eventId: string): void {
   const event = db.prepare('SELECT id, title, category, faculty, club_name, start_at FROM events WHERE id = ? AND status = ?')
     .get(eventId, 'published') as { id: string; title: string; category: string; faculty: string; club_name: string | null; start_at: string } | undefined;
@@ -229,8 +238,10 @@ function notifyStudentsAboutRecommendedEvent(eventId: string): void {
     WHERE role = 'student' AND is_active = 1 AND personalization_enabled = 1`).all() as Array<{ id: string; faculty: string | null; interests: string; clubs: string }>;
   const mark = db.prepare('INSERT OR IGNORE INTO notification_markers (event_id, account_id, kind, created_at) VALUES (?, ?, ?, ?)');
   for (const student of students) {
+    const interests = parseJson<string[]>(student.interests);
+    const matchingCategories = interests.flatMap((interest) => interestCategories[interest] ?? []);
     if (student.faculty !== event.faculty
-      && !parseJson<string[]>(student.interests).includes(event.category)
+      && !matchingCategories.includes(event.category)
       && !(event.club_name && parseJson<string[]>(student.clubs).includes(event.club_name))) continue;
     const registered = db.prepare(`SELECT 1 FROM registrations WHERE event_id = ? AND account_id = ? AND status IN ('registered', 'waitlisted')`)
       .get(event.id, student.id);
@@ -246,6 +257,7 @@ const signupSchema = z.object({
   faculty: z.string().trim().min(1).max(120),
   course: z.string().trim().min(1).max(120),
   registrationNo: z.string().trim().min(2).max(40),
+  interests: z.array(z.enum(['Technology', 'Business', 'Sports', 'Leadership', 'Innovation', 'Entertainment'])).max(6).default([]),
   password: z.string().min(10).max(128),
   confirmPassword: z.string().min(10).max(128),
 }).refine((value) => value.password === value.confirmPassword, {
@@ -261,7 +273,7 @@ app.post('/api/auth/signup', (req, res) => {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the sign-up details.' });
     return;
   }
-  const { email, displayName, faculty, course, registrationNo, password } = parsed.data;
+  const { email, displayName, faculty, course, registrationNo, password, interests } = parsed.data;
   const normalizedEmail = email.toLowerCase();
   if (db.prepare('SELECT 1 FROM accounts WHERE email = ?').get(normalizedEmail)) {
     res.status(409).json({ error: 'An account already uses that email.' });
@@ -277,9 +289,9 @@ app.post('/api/auth/signup', (req, res) => {
   const adminEnabled = configuredAdminEmails.includes(normalizedEmail) ? 1 : 0;
   const createAccount = db.transaction(() => {
     db.prepare(`
-      INSERT INTO accounts (id, email, display_name, password_hash, role, faculty, course, registration_no, admin_enabled, created_at)
-      VALUES (?, ?, ?, ?, 'student', ?, ?, ?, ?, ?)
-    `).run(accountId, normalizedEmail, displayName, bcrypt.hashSync(password, 10), faculty, course, registrationNo, adminEnabled, createdAt);
+      INSERT INTO accounts (id, email, display_name, password_hash, role, faculty, course, registration_no, interests, admin_enabled, created_at)
+      VALUES (?, ?, ?, ?, 'student', ?, ?, ?, ?, ?, ?)
+    `).run(accountId, normalizedEmail, displayName, bcrypt.hashSync(password, 10), faculty, course, registrationNo, JSON.stringify(interests), adminEnabled, createdAt);
   });
   try {
     createAccount();
@@ -1342,9 +1354,10 @@ app.get('/api/recommendations', requireAuth, requireRole('student'), (req: Authe
   const recommendations = rows.map((row) => {
     const reasons: string[] = [];
     let score = 0;
-    if (interests.includes(String(row.category))) {
+    const matchingInterest = interests.find((interest) => interestCategories[interest]?.includes(String(row.category)));
+    if (matchingInterest) {
       score += 25;
-      reasons.push(`Matches your interest in ${String(row.category)}`);
+      reasons.push(`Matches your interest in ${matchingInterest}`);
     }
     if (account.faculty && row.faculty === account.faculty) {
       score += 25;
