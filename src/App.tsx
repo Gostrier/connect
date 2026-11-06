@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import {
   ArrowRight,
   ArrowUpRight,
@@ -51,6 +52,8 @@ type Screen =
   | 'details'
   | 'publish'
   | 'calendar'
+  | 'registered'
+  | 'saved'
   | 'recommendations'
   | 'notifications'
   | 'profile'
@@ -64,7 +67,7 @@ type Screen =
 
 type Recommendation = { event: CampusEvent; score: number; reasons: string[] };
 type AttendanceState = {
-  session: { status: 'not_open' | 'open' | 'closed'; openedAt: string | null; closedAt: string | null };
+  session: { status: 'not_open' | 'open' | 'closed'; openedAt: string | null; closedAt: string | null; checkInCode?: string | null };
   eventOngoing: boolean;
   canManage: boolean;
   canAttend: boolean;
@@ -72,9 +75,9 @@ type AttendanceState = {
   radiusMeters: number;
   attendees: AttendanceAttendee[];
 };
-type AttendanceAttendee = { displayName: string; email: string; faculty: string | null; course: string | null; checkedInAt: string };
+type AttendanceAttendee = { displayName: string; email: string; faculty: string | null; course: string | null; registrationNo: string | null; checkedInAt: string };
 type ManagedRoom = { id: string; code: string; name: string; capacity: number; facilities: string[]; bufferMinutes: number; verified: boolean };
-type ManagedUser = { id: string; email: string; displayName: string; role: string; faculty: string | null; course: string | null; organizerEnabled: number; adminEnabled: number; isActive: number; createdAt: string };
+type ManagedUser = { id: string; email: string; displayName: string; role: string; faculty: string | null; course: string | null; registrationNo: string | null; organizerEnabled: number; adminEnabled: number; isActive: number; createdAt: string };
 type RoomOption = {
   roomId: string;
   code: string;
@@ -83,6 +86,8 @@ type RoomOption = {
   facilities: string[];
   missingFacilities: string[];
   capacityFitScore: number;
+  recommendationScore: number;
+  attendanceEstimate: number;
   conflict: { eventId: string; eventTitle: string; startAt: string; endAt: string } | null;
   eligible: boolean;
   reasons: string[];
@@ -215,7 +220,7 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
   onSuccess: (account: Account) => void;
 }) {
   const [mode, setMode] = useState(initialMode);
-  const [form, setForm] = useState({ displayName: '', email: '', faculty: '', course: '', password: '', confirmPassword: '' });
+  const [form, setForm] = useState({ displayName: '', email: '', faculty: '', course: '', registrationNo: '', password: '', confirmPassword: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -264,6 +269,9 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
             </label>
             <label>Course
               <input required maxLength={120} value={form.course} onChange={(event) => setForm({ ...form, course: event.target.value })} placeholder="e.g. Information Technology" autoComplete="organization" />
+            </label>
+            <label>Registration No
+              <input required minLength={2} maxLength={40} value={form.registrationNo} onChange={(event) => setForm({ ...form, registrationNo: event.target.value })} placeholder="e.g. SIT/2024/001" autoComplete="off" />
             </label>
           </>}
           <label>Password
@@ -368,9 +376,9 @@ function StudentDashboard({ account, events, recommendations, onNavigate, onOpen
         <div className="welcome-side"><div className="welcome-date"><CalendarDays size={18} /><span>{formatDate(todayIso, { weekday: 'long', month: 'long', day: 'numeric' })}</span></div><div className="welcome-decoration">✳</div></div>
       </section>
       <section className="dashboard-stats">
-        <StatCard label="Registered events" value={String(upcoming.length).padStart(2, '0')} detail="On your calendar" icon={<CalendarDays />} tone="blue" />
-        <StatCard label="Saved for later" value={String(savedIds.length).padStart(2, '0')} detail="Ideas worth keeping" icon={<Bookmark />} tone="lavender" />
-        <StatCard label="For you" value={String(recommendations.length).padStart(2, '0')} detail="Fresh recommendations" icon={<Sparkles />} tone="amber" />
+        <StatCard label="Registered events" value={String(upcoming.length).padStart(2, '0')} detail="On your calendar" icon={<CalendarDays />} tone="blue" onClick={() => onNavigate('registered')} />
+        <StatCard label="Saved for later" value={String(savedIds.length).padStart(2, '0')} detail="Ideas worth keeping" icon={<Bookmark />} tone="lavender" onClick={() => onNavigate('saved')} />
+        <StatCard label="For you" value={String(recommendations.length).padStart(2, '0')} detail="Fresh recommendations" icon={<Sparkles />} tone="amber" onClick={() => onNavigate('recommendations')} />
       </section>
       <section className="section-block compact-section">
         <div className="section-heading"><div><p className="eyebrow">A LITTLE SOMETHING FOR YOU</p><h2>Picked for your week</h2></div><button className="text-button" onClick={() => onNavigate('recommendations')}>All recommendations <ArrowRight size={15} /></button></div>
@@ -400,8 +408,21 @@ function StudentDashboard({ account, events, recommendations, onNavigate, onOpen
   );
 }
 
-function StatCard({ label, value, detail, icon, tone }: { label: string; value: string; detail: string; icon: ReactNode; tone: string }) {
-  return <div className="stat-card"><span className={`stat-icon ${tone}`}>{icon}</span><div><span className="stat-label">{label}</span><strong>{value}</strong><small>{detail}</small></div></div>;
+function StatCard({ label, value, detail, icon, tone, onClick }: { label: string; value: string; detail: string; icon: ReactNode; tone: string; onClick?: () => void }) {
+  const content = <><span className={`stat-icon ${tone}`}>{icon}</span><span className="stat-card-copy"><span className="stat-label">{label}</span><strong>{value}</strong><small>{detail}</small></span></>;
+  return onClick
+    ? <button type="button" className="stat-card" onClick={onClick} aria-label={`${label}: ${value}. ${detail}`}>{content}</button>
+    : <div className="stat-card">{content}</div>;
+}
+
+function SavedEventsPage({ events, savedIds, onOpen, onRegister, onSave, onDiscover }: { events: CampusEvent[]; savedIds: string[]; onOpen: (event: CampusEvent) => void; onRegister: (event: CampusEvent) => void; onSave: (eventId: string) => void; onDiscover: () => void }) {
+  const savedEvents = events.filter((event) => savedIds.includes(event.id));
+  return <div className="page-stack"><PageTitle eyebrow="YOUR BOOKMARKS" title="Saved for later" description="Events you’ve saved to come back to." />{savedEvents.length ? <div className="event-grid">{savedEvents.map((event) => <EventCard key={event.id} event={event} onOpen={() => onOpen(event)} onRegister={() => onRegister(event)} onSave={() => onSave(event.id)} saved />)}</div> : <EmptyState icon={<Bookmark />} title="Nothing saved yet" description="Save events you’re interested in and they’ll appear here." action={<button className="button button-secondary" onClick={onDiscover}>Explore events</button>} />}</div>;
+}
+
+function RegisteredEventsPage({ events, onOpen, onRegister, onSave, savedIds, onBack }: { events: CampusEvent[]; onOpen: (event: CampusEvent) => void; onRegister: (event: CampusEvent) => void; onSave: (eventId: string) => void; savedIds: string[]; onBack: () => void }) {
+  const registeredEvents = events.filter((event) => event.currentRegistrationStatus === 'registered');
+  return <div className="page-stack"><PageTitle eyebrow="YOUR CAMPUS PLANS" title="Registered events" description="Events you’ve registered for, all in one place." action={<button className="button button-secondary" onClick={onBack}><ChevronLeft size={16} />Back to overview</button>} />{registeredEvents.length ? <div className="event-grid">{registeredEvents.map((event) => <EventCard key={event.id} event={event} onOpen={() => onOpen(event)} onRegister={() => onRegister(event)} onSave={() => onSave(event.id)} saved={savedIds.includes(event.id)} />)}</div> : <EmptyState icon={<CalendarDays />} title="No registered events yet" description="When you register for an event, it will appear here." />}</div>;
 }
 
 function RecommendationCard({ item, onOpen, onRegister, onSave, saved }: {
@@ -514,6 +535,7 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
   organizerWorkspace?: boolean;
 }) {
   const color = categoryColors[event.category] ?? 'blue';
+  const registrationOpen = Date.now() < Date.parse(event.registrationClosesAt);
   const share = async () => {
     const url = window.location.href;
     if (navigator.share) await navigator.share({ title: event.title, text: event.description, url });
@@ -548,11 +570,13 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
             ? <button className="button button-secondary button-wide" onClick={onCancelRegistration}>Cancel registration</button>
             : account?.role === 'student' && event.currentRegistrationStatus === 'waitlisted'
               ? <><div className="waitlist-position">You’re <b>#{event.currentWaitlistPosition ?? '—'}</b> in the first-in, first-out queue.</div><button className="button button-waitlist button-wide" onClick={onCancelRegistration}>Leave waitlist</button></>
-              : account?.role === 'student'
+              : account?.role === 'student' && registrationOpen
                 ? <button className="button button-primary button-wide" onClick={onRegister}>{event.seatsAvailable > 0 ? 'Register for free' : 'Join waitlist'} <ArrowRight size={16} /></button>
+                : account?.role === 'student'
+                  ? <p className="field-note">Registration is closed.</p>
                 : <p className="field-note">Sign in as a Student to register.</p>}
           <div className="side-actions"><button className={`text-button ${saved ? 'saved-text' : ''}`} onClick={onSave}><Bookmark size={15} fill={saved ? 'currentColor' : 'none'} />{saved ? 'Saved' : 'Save event'}</button><button className="text-button" onClick={() => void share()}><Share2 size={15} />Share</button></div>
-          {organizerWorkspace && <button className="button button-secondary button-wide" onClick={onEdit}>Edit event</button>}
+          {organizerWorkspace && event.isEventOrganizer && <button className="button button-secondary button-wide" onClick={onEdit}>Edit event</button>}
         </aside>
       </div>
     </div>
@@ -583,10 +607,58 @@ function AttendancePanel({ eventId, role }: { eventId: string; role: Account['ro
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [sessionCode, setSessionCode] = useState('');
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const refresh = useCallback(async () => {
     const result = await api<AttendanceState>(`/events/${eventId}/attendance`);
     setAttendance(result);
   }, [eventId]);
+
+  useEffect(() => {
+    if (!scannerOpen) return;
+    let active = true;
+    let frame = 0;
+    let stream: MediaStream | undefined;
+    const scan = async () => {
+      const Detector = (window as unknown as { BarcodeDetector?: new (options: { formats: string[] }) => { detect: (video: HTMLVideoElement) => Promise<Array<{ rawValue: string }>> } }).BarcodeDetector;
+      if (!Detector) {
+        setError('QR scanning is not supported by this browser. Use the organizer code below instead.');
+        setScannerOpen(false);
+        return;
+      }
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        if (!active || !videoRef.current) return;
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+        const detector = new Detector({ formats: ['qr_code'] });
+        const tick = async () => {
+          if (!active || !videoRef.current) return;
+          try {
+            const codes = await detector.detect(videoRef.current);
+            if (codes[0]?.rawValue) {
+              setSessionCode(codes[0].rawValue.trim());
+              setScannerOpen(false);
+              setMessage('QR code scanned. Confirm your attendance below.');
+              return;
+            }
+          } catch { /* Wait for the next camera frame. */ }
+          frame = window.requestAnimationFrame(() => { void tick(); });
+        };
+        void tick();
+      } catch {
+        setError('Camera access failed. Allow camera access or enter the organizer code manually.');
+        setScannerOpen(false);
+      }
+    };
+    void scan();
+    return () => {
+      active = false;
+      window.cancelAnimationFrame(frame);
+      stream?.getTracks().forEach((track) => track.stop());
+    };
+  }, [scannerOpen]);
 
   useEffect(() => {
     let mounted = true;
@@ -605,7 +677,7 @@ function AttendancePanel({ eventId, role }: { eventId: string; role: Account['ro
     return () => { mounted = false; window.clearInterval(timer); };
   }, [eventId]);
 
-  const act = async (action: 'open' | 'close' | 'check-in') => {
+  const act = async (action: 'open' | 'close' | 'check-in', code?: string) => {
     setBusy(true);
     setError('');
     setMessage('');
@@ -613,7 +685,7 @@ function AttendancePanel({ eventId, role }: { eventId: string; role: Account['ro
       const location = action === 'close' ? undefined : await getCurrentLocation();
       await api(`/events/${eventId}/attendance/${action}`, {
         method: 'POST',
-        ...(location ? { body: JSON.stringify(location) } : {}),
+        ...(location ? { body: JSON.stringify(action === 'check-in' ? { ...location, sessionCode: code } : location) } : {}),
       });
       setMessage(action === 'open' ? 'Attendance is open. Students can check in at this location.' : action === 'close' ? 'Attendance is closed.' : 'Your attendance has been marked.');
       await refresh();
@@ -632,23 +704,24 @@ function AttendancePanel({ eventId, role }: { eventId: string; role: Account['ro
       {loading ? <p className="field-note">Loading attendance status…</p> : attendance && (
         <>
           {organizerView && <p className="attendance-description">Open attendance while you are at the event. The location at opening becomes the check-in point.</p>}
+          {attendance.canManage && attendance.session.status === 'open' && attendance.session.checkInCode && <div className="attendance-qr-card"><div><h3>Student check-in QR</h3><p>Students scan this code while at the event. Location is checked when they confirm.</p><code>{attendance.session.checkInCode}</code></div><QRCodeSVG value={attendance.session.checkInCode} size={156} level="M" aria-label="Attendance check-in QR code" /></div>}
           {!organizerView && !attendance.canAttend && <p className="attendance-description">Check-in is available to students with a confirmed registration.</p>}
           {organizerView
             ? attendance.session.status === 'open'
               ? <div className="attendance-actions"><span className="attendance-live"><i /> Attendance is open</span><button className="button button-secondary button-small" disabled={busy} onClick={() => void act('close')}>{busy ? 'Closing…' : 'Close attendance'}</button></div>
               : attendance.session.status === 'closed'
-                ? <div className="attendance-success"><CheckCircle2 size={17} /> Attendance is closed.</div>
+                ? <div className="attendance-actions"><span className="attendance-success"><CheckCircle2 size={17} /> Attendance is closed.</span>{attendance.eventOngoing && <button className="button button-secondary button-small" disabled={busy} onClick={() => void act('open')}>{busy ? 'Getting location…' : 'Reopen attendance'}</button>}</div>
                 : <button className="button button-primary button-small" disabled={busy || !attendance.eventOngoing} onClick={() => void act('open')}>{busy ? 'Getting location…' : attendance.eventOngoing ? 'Open attendance at this location' : 'Available during the event'}</button>
             : attendance.checkedInAt
             ? <div className="attendance-success"><CheckCircle2 size={17} /> Attendance marked at {formatTime(attendance.checkedInAt)}.</div>
               : attendance.session.status === 'open' && attendance.eventOngoing && attendance.canAttend
-                ? <button className="button button-primary button-small" disabled={busy} onClick={() => void act('check-in')}>{busy ? 'Checking location…' : 'Mark my attendance'}</button>
+                ? <div className="student-checkin"><div className="attendance-actions"><button className="button button-secondary button-small" onClick={() => { setError(''); setScannerOpen((open) => !open); }}>{scannerOpen ? 'Close scanner' : 'Scan attendance QR'}</button><span className="field-note">or enter the organizer’s code</span></div>{scannerOpen && <video ref={videoRef} className="attendance-qr-camera" playsInline muted aria-label="Camera QR scanner" />}<label className="field-label">Attendance code<input value={sessionCode} onChange={(event) => setSessionCode(event.target.value.trim())} placeholder="Enter or scan the organizer code" /></label><button className="button button-primary button-small" disabled={busy || sessionCode.length < 16} onClick={() => void act('check-in', sessionCode)}>{busy ? 'Checking location…' : 'Confirm attendance'}</button></div>
                 : <p className="field-note">{attendance.session.status === 'closed' ? 'The organizer has closed attendance.' : attendance.session.status === 'not_open' ? 'The organizer has not opened attendance yet.' : attendance.eventOngoing ? 'A confirmed registration is required to check in.' : 'Check-in is available while the event is ongoing.'}</p>}
           {attendance.canManage && attendance.attendees.length > 0 && <div className="attendance-roster">
             <h3>Checked-in students <span>{attendance.attendees.length}</span></h3>
             {attendance.attendees.map((student) => <div className="attendance-student" key={student.email}>
               <span className="attendance-student-avatar">{initials(student.displayName)}</span>
-              <div><b>{student.displayName}</b><small>{student.email}</small><small>{[student.course, student.faculty].filter(Boolean).join(' · ') || 'Student'}</small></div>
+              <div><b>{student.displayName}</b><small>{student.email}</small><small>{student.registrationNo ? `Registration No: ${student.registrationNo} · ` : ''}{[student.course, student.faculty].filter(Boolean).join(' · ') || 'Student'}</small></div>
               <time>{formatTime(student.checkedInAt)}</time>
             </div>)}
           </div>}
@@ -710,8 +783,8 @@ function NotificationsPage({ notifications, onRead }: { notifications: Notificat
       <PageTitle eyebrow="STAY IN THE LOOP" title="Notifications" description="The useful things, right when you need them." action={<span className="count-pill">{unread.length} unread</span>} />
       <div className="notification-preferences"><div className="preference-icon"><Bell size={19} /></div><div><strong>In-app updates are on</strong><p>Push and SMS delivery are not configured in this presentation build.</p></div><span className="status-pill status-on">Active</span></div>
       <div className="notification-list">
-        {notifications.map((item) => <button className={`notification-item ${item.readAt ? '' : 'unread'}`} key={item.id} onClick={() => onRead(item)}><span className={`notification-icon ${item.kind}`}><NotificationIcon kind={item.kind} /></span><span className="notification-copy"><b>{item.message}</b><small>{formatDate(item.createdAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</small></span>{!item.readAt && <span className="unread-dot" />}</button>)}
-        {!notifications.length && <EmptyState icon={<Bell />} title="You’re all caught up" description="Registration confirmations and event reminders will show up here." />}
+        {notifications.map((item) => <button className={`notification-item ${item.readAt ? '' : 'unread'}`} key={item.id} onClick={() => onRead(item)}><span className={`notification-icon ${item.kind}`}><NotificationIcon kind={item.kind} /></span><span className="notification-copy"><b>{notificationLabel(item.kind)}</b><span>{item.message}</span><small>{formatDate(item.createdAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</small></span>{!item.readAt && <span className="unread-dot" />}</button>)}
+        {!notifications.length && <EmptyState icon={<Bell />} title="You’re all caught up" description="Event reminders, closing alerts, venue updates, recommendations, and attendance confirmations will show up here." />}
       </div>
     </div>
   );
@@ -719,8 +792,25 @@ function NotificationsPage({ notifications, onRead }: { notifications: Notificat
 
 function NotificationIcon({ kind }: { kind: string }) {
   if (kind === 'event_changes') return <MessageSquareText size={18} />;
+  if (kind === 'event_reminder') return <CalendarDays size={18} />;
+  if (kind === 'registration_close') return <Clock3 size={18} />;
+  if (kind === 'venue_changed') return <MapPin size={18} />;
   if (kind === 'recommendation') return <Sparkles size={18} />;
   return <CheckCircle2 size={18} />;
+}
+
+function notificationLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    event_reminder: 'Event Tomorrow',
+    registration_close: 'Registration Closing Today',
+    venue_changed: 'Venue Changed',
+    recommendation: 'New Recommended Event',
+    attendance_confirmed: 'Attendance Confirmed',
+    registration: 'Registration Update',
+    event_changes: 'Event Update',
+    organizer_application: 'Organizer Application',
+  };
+  return labels[kind] ?? 'CampusConnect Update';
 }
 
 function RecommendationsPage({ items, onOpen, onRegister }: {
@@ -742,6 +832,7 @@ function ProfilePage({ account, onUpdate }: { account: Account; onUpdate: (patch
   const [clubs, setClubs] = useState(account.clubs);
   const [faculty, setFaculty] = useState(account.faculty ?? '');
   const [course, setCourse] = useState(account.course ?? '');
+  const [registrationNo, setRegistrationNo] = useState(account.registrationNo ?? '');
   const [personalization, setPersonalization] = useState(account.personalizationEnabled);
   const [notificationPreferences, setNotificationPreferences] = useState(account.inAppPreferences);
   const [saved, setSaved] = useState(false);
@@ -754,6 +845,7 @@ function ProfilePage({ account, onUpdate }: { account: Account; onUpdate: (patch
       await onUpdate({
         faculty: faculty || null,
         course: course || null,
+        registrationNo: registrationNo || null,
         interests,
         clubs,
         personalizationEnabled: personalization,
@@ -773,6 +865,7 @@ function ProfilePage({ account, onUpdate }: { account: Account; onUpdate: (patch
           <div className="profile-person"><span className="profile-avatar">{initials(account.displayName)}</span><div><h2>{account.displayName}</h2><span>{account.email}</span></div><span className="role-pill">{account.adminEnabled ? 'Administrator' : account.organizerEnabled ? 'Student · Organizer' : account.role}</span></div>
           <label>Faculty or school<input value={faculty} onChange={(event) => setFaculty(event.target.value)} placeholder="Optional" /></label>
           <label>Course of study<input value={course} onChange={(event) => setCourse(event.target.value)} placeholder="Optional" /></label>
+          <label>Registration No<input value={registrationNo} onChange={(event) => setRegistrationNo(event.target.value)} placeholder="Enter your registration number" /></label>
           <fieldset><legend>What are you curious about?</legend><div className="chip-select-list">{categories.map((item) => <button type="button" className={`select-chip ${interests.includes(item) ? 'selected' : ''}`} key={item} onClick={() => toggle(interests, setInterests, item)}>{interests.includes(item) && <Check size={13} />}{item}</button>)}</div></fieldset>
           <label>Clubs and communities, separated by commas<input value={clubs.join(', ')} onChange={(event) => setClubs(event.target.value.split(',').map((item) => item.trim()).filter(Boolean))} placeholder="Optional" /></label>
           <div className="toggle-row"><span><b>Personalized recommendations</b><small>Use these profile details to explain event matches.</small></span><button type="button" className={`toggle ${personalization ? 'on' : ''}`} role="switch" aria-checked={personalization} onClick={() => setPersonalization(!personalization)}><i /></button></div>
@@ -781,6 +874,9 @@ function ProfilePage({ account, onUpdate }: { account: Account; onUpdate: (patch
             ['event_reminder', '24-hour event reminders'],
             ['registration_close', 'Registration closing alerts'],
             ['event_changes', 'Event changes and cancellations'],
+            ['venue_changed', 'Venue changes'],
+            ['recommendation', 'Recommended events'],
+            ['attendance_confirmed', 'Attendance confirmations'],
           ].map(([key, label]) => {
             const enabled = notificationPreferences[key] !== false;
             return <div className="toggle-row preference-toggle" key={key}><span><b>{label}</b></span><button type="button" className={`toggle ${enabled ? 'on' : ''}`} role="switch" aria-checked={enabled} onClick={() => setNotificationPreferences((current) => ({ ...current, [key]: !enabled }))}><i /></button></div>;
@@ -923,11 +1019,13 @@ function OrganizerApplicationsPage({ account, canReview, onAccountUpdated }: {
   );
 }
 
-function CreateEventPage({ onSave, editing, onRooms, onPublishReview }: {
+function CreateEventPage({ onSave, editing, onRooms, onPublishReview, onDone, onCancel }: {
   onSave: (payload: Record<string, unknown>) => Promise<CampusEvent>;
   editing: CampusEvent | null;
   onRooms: (event: CampusEvent) => void;
   onPublishReview: (event: CampusEvent) => void;
+  onDone: (event: CampusEvent) => void;
+  onCancel: () => void;
 }) {
   const initialStart = new Date(Date.now() + 4 * 24 * 60 * 60_000);
   initialStart.setHours(14, 0, 0, 0);
@@ -949,6 +1047,7 @@ function CreateEventPage({ onSave, editing, onRooms, onPublishReview }: {
   const [error, setError] = useState('');
   const [savedEvent, setSavedEvent] = useState<CampusEvent | null>(null);
   const [busy, setBusy] = useState(false);
+  const ongoing = editing?.status === 'published' && Date.now() >= Date.parse(editing.startAt) && Date.now() < Date.parse(editing.endAt);
   const set = (key: string, value: string | number | string[]) => setForm((current) => ({ ...current, [key]: value }));
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -966,7 +1065,12 @@ function CreateEventPage({ onSave, editing, onRooms, onPublishReview }: {
         clubName: form.clubName || null,
         meetingUrl: form.meetingUrl || null,
       };
-      setSavedEvent(await onSave(payload));
+      const updated = await onSave(payload);
+      if (editing?.status === 'published') {
+        onDone(updated);
+        return;
+      }
+      setSavedEvent(updated);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The event could not be saved.');
     } finally {
@@ -979,7 +1083,7 @@ function CreateEventPage({ onSave, editing, onRooms, onPublishReview }: {
   }
   return (
     <div className="page-stack">
-      <PageTitle eyebrow={editing ? 'UPDATE YOUR EVENT' : 'BRING YOUR IDEA TO CAMPUS'} title={editing ? 'Edit event' : 'Create an event'} description="Start with the essentials. You can review everything before it goes live." />
+      <PageTitle eyebrow={editing ? 'UPDATE YOUR EVENT' : 'BRING YOUR IDEA TO CAMPUS'} title={editing ? 'Edit event' : 'Create an event'} description={ongoing ? 'This event is in progress. You can extend registration or the event end time, and update other details.' : "Start with the essentials. You can review everything before it goes live."} />
       <form className="create-layout" onSubmit={(event) => void submit(event)}>
         <div className="create-form panel">
           <label>Event name<input required minLength={4} maxLength={120} value={form.title} onChange={(event) => set('title', event.target.value)} placeholder="e.g. Design thinking workshop" /></label>
@@ -987,12 +1091,12 @@ function CreateEventPage({ onSave, editing, onRooms, onPublishReview }: {
           <div className="form-two-col"><label>Faculty or school<input required value={form.faculty} onChange={(event) => set('faculty', event.target.value)} placeholder="e.g. School of Computing" /></label><label>Category<select value={form.category} onChange={(event) => set('category', event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></label></div>
           <div className="form-two-col"><label>Event type<select value={form.deliveryMode} onChange={(event) => set('deliveryMode', event.target.value)}><option value="in_person">In-person</option><option value="online">Online</option><option value="hybrid">Hybrid</option></select></label><label>Club or community<input value={form.clubName} onChange={(event) => set('clubName', event.target.value)} placeholder="Optional" /></label></div>
           <div className="form-two-col"><label>Starts<input required type="datetime-local" value={form.startAt} onChange={(event) => set('startAt', event.target.value)} /></label><label>Ends<input required type="datetime-local" value={form.endAt} onChange={(event) => set('endAt', event.target.value)} /></label></div>
-          <label>Registration closes<input required type="datetime-local" value={form.registrationClosesAt} onChange={(event) => set('registrationClosesAt', event.target.value)} /><small className="field-note">The default is 24 hours before the event starts.</small></label>
+          <label>Registration closes<input required type="datetime-local" value={form.registrationClosesAt} onChange={(event) => set('registrationClosesAt', event.target.value)} /><small className="field-note">{ongoing ? 'For an ongoing event, extend this time to reopen registration.' : 'The default is 24 hours before the event starts.'}</small></label>
           <div className="form-two-col"><label>Expected attendance<input required min={1} max={10000} type="number" value={form.expectedAttendance} onChange={(event) => set('expectedAttendance', Number(event.target.value))} /></label><label>Registration capacity<input min={1} max={10000} type="number" value={form.registrationCapacity} onChange={(event) => set('registrationCapacity', event.target.value === '' ? '' : Number(event.target.value))} placeholder={form.deliveryMode === 'online' ? 'Defaults to expected attendance' : 'Defaults to room capacity'} /><small className="field-note">Leave blank to use the room capacity, or expected attendance for Online events.</small></label></div>
           {form.deliveryMode !== 'online' && <fieldset><legend>Required facilities</legend><div className="facility-checks">{facilities.map((item) => <label key={item}><input type="checkbox" checked={form.requiredFacilities.includes(item)} onChange={() => set('requiredFacilities', form.requiredFacilities.includes(item) ? form.requiredFacilities.filter((facility) => facility !== item) : [...form.requiredFacilities, item])} />{item}</label>)}</div></fieldset>}
           {(form.deliveryMode === 'online' || form.deliveryMode === 'hybrid') && <label>Meeting link<input type="url" required={form.deliveryMode === 'online'} value={form.meetingUrl} onChange={(event) => set('meetingUrl', event.target.value)} placeholder="https://…" /></label>}
           {error && <div className="form-error" role="alert">{error}</div>}
-          <div className="form-actions"><button type="button" className="button button-secondary">Save draft</button><button className="button button-primary" disabled={busy}>{busy ? 'Saving…' : 'Save and continue'} <ArrowRight size={16} /></button></div>
+          <div className="form-actions"><button type="button" className="button button-secondary" onClick={onCancel}>Cancel</button><button className="button button-primary" disabled={busy}>{busy ? 'Saving…' : editing?.status === 'published' ? 'Save event updates' : 'Save and continue'} <ArrowRight size={16} /></button></div>
         </div>
         <aside className="create-aside">
           <div className="aside-tip"><span><Sparkles size={17} /></span><strong>Room fit, made clearer</strong><p>We’ll check verified capacity, required facilities, and schedule conflicts. A person confirms every allocation.</p></div>
@@ -1036,6 +1140,8 @@ function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflicts
   const candidates = events.filter((event) => event.status === 'draft' && event.deliveryMode !== 'online');
   const [configured, setConfigured] = useState(false);
   const [rooms, setRooms] = useState<RoomOption[]>([]);
+  const [eventOverlaps, setEventOverlaps] = useState<Array<{ eventId: string; eventTitle: string; startAt: string; endAt: string; roomId: string | null }>>([]);
+  const [attendanceEstimate, setAttendanceEstimate] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const selected = candidates.find((event) => event.id === selectedId) ?? candidates[0];
@@ -1043,8 +1149,8 @@ function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflicts
     if (!selected) return;
     setLoading(true);
     setError('');
-    api<{ configured: boolean; recommendations: RoomOption[] }>(`/events/${selected.id}/room-options`)
-      .then((result) => { setConfigured(result.configured); setRooms(result.recommendations); })
+    api<{ configured: boolean; recommendations: RoomOption[]; attendanceEstimate: number; eventOverlaps: typeof eventOverlaps }>(`/events/${selected.id}/room-options`)
+      .then((result) => { setConfigured(result.configured); setRooms(result.recommendations); setEventOverlaps(result.eventOverlaps); setAttendanceEstimate(result.attendanceEstimate); })
       .catch((reason) => setError(reason instanceof Error ? reason.message : 'Could not load room options.'))
       .finally(() => setLoading(false));
   }, [selected?.id]);
@@ -1053,7 +1159,7 @@ function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflicts
     <div className="page-stack">
       <PageTitle eyebrow={conflictsOnly ? 'SCHEDULE CHECK' : 'SMART ROOM ALLOCATION'} title={conflictsOnly ? 'Conflict detection' : 'Find a room that fits.'} description={conflictsOnly ? 'See room conflicts and suitable alternatives before publishing.' : 'The organizer stays in control. CampusConnect checks availability, capacity, and required facilities.'} />
       {candidates.length > 0 && <label className="event-select-label">Draft event<select value={selected?.id ?? ''} onChange={(event) => onSelectEvent(event.target.value)}>{candidates.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>}
-      {selected && <div className="allocation-event-summary"><span className="event-summary-icon"><CalendarDays size={19} /></span><div><b>{selected.title}</b><small>{formatDate(selected.startAt)} · {formatTime(selected.startAt)}–{formatTime(selected.endAt)} · Expected {selected.expectedAttendance}</small></div><span className="status-pill status-draft">Draft</span></div>}
+      {selected && <div className="allocation-event-summary"><span className="event-summary-icon"><CalendarDays size={19} /></span><div><b>{selected.title}</b><small>{formatDate(selected.startAt)} · {formatTime(selected.startAt)}–{formatTime(selected.endAt)} · Expected {selected.expectedAttendance} · Predicted attendance {attendanceEstimate}</small></div><span className="status-pill status-draft">Draft</span></div>}
       {error && <div className="form-error" role="alert">{error}</div>}
       {!selected ? <EmptyState icon={<DoorOpen />} title="No in-person drafts yet" description="Create an in-person or hybrid event to check room fit." /> : loading ? <div className="loading-panel">Checking verified room inventory…</div> : !configured ? (
         <div className="inventory-empty">
@@ -1065,9 +1171,10 @@ function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflicts
         </div>
       ) : (
         <>
-          <div className="allocation-score-note"><Sparkles size={17} /><span>Eligible rooms meet every hard requirement. Fit score = expected attendance ÷ room capacity.</span></div>
+          <div className="allocation-score-note"><Sparkles size={17} /><span>Eligible rooms meet capacity, facility, and availability requirements. Recommendations balance predicted attendance, room fit, facilities, and schedule.</span></div>
+          {eventOverlaps.length > 0 && <div className="conflict-alert"><span><ShieldCheck size={19} /></span><div><strong>Event schedule overlap</strong><p>{eventOverlaps.map((overlap) => `${overlap.eventTitle} (${formatTime(overlap.startAt)}–${formatTime(overlap.endAt)})`).join(' · ')} overlaps this event time.</p></div></div>}
           {conflictsOnly && rooms.some((room) => room.conflict) && <div className="conflict-alert"><span><ShieldCheck size={19} /></span><div><strong>Schedule conflicts found</strong><p>One or more rooms overlap with another booking. Choose an eligible alternative or reschedule.</p></div></div>}
-          <div className="room-table-wrap"><table className="room-table"><thead><tr><th>Room</th><th>Capacity</th><th>Facilities</th><th>Fit score</th><th>Status</th><th /></tr></thead><tbody>{rooms.map((room) => <tr key={room.roomId} className={room.eligible ? '' : 'room-ineligible'}><td><strong>{room.name}</strong><small>{room.code}</small></td><td>{room.capacity} seats</td><td><div className="facility-pills">{room.facilities.map((item) => <span key={item}>{item}</span>)}</div>{room.missingFacilities.length > 0 && <small className="missing-facility">Missing {room.missingFacilities.join(', ')}</small>}</td><td><strong>{room.capacityFitScore}%</strong><small>capacity fit</small></td><td>{room.conflict ? <span className="status-pill status-error">Conflict</span> : room.eligible ? <span className="status-pill status-on">Available</span> : <span className="status-pill status-muted">Not suitable</span>}</td><td>{room.eligible && <button className="button button-small button-primary" onClick={() => void onConfirmRoom(selected.id, room.roomId)}>Confirm</button>}</td></tr>)}</tbody></table></div>
+          <div className="room-table-wrap"><table className="room-table"><thead><tr><th>Room</th><th>Capacity</th><th>Facilities</th><th>Recommendation</th><th>Status</th><th /></tr></thead><tbody>{rooms.map((room) => <tr key={room.roomId} className={room.eligible ? '' : 'room-ineligible'}><td><strong>{room.name}</strong><small>{room.code}</small></td><td>{room.capacity} seats</td><td><div className="facility-pills">{room.facilities.map((item) => <span key={item}>{item}</span>)}</div>{room.missingFacilities.length > 0 && <small className="missing-facility">Missing {room.missingFacilities.join(', ')}</small>}</td><td><strong>{room.recommendationScore}%</strong><small>{room.capacityFitScore}% predicted utilization</small></td><td>{room.conflict ? <span className="status-pill status-error">Conflict</span> : room.eligible ? <span className="status-pill status-on">Available</span> : <span className="status-pill status-muted">Not suitable</span>}</td><td>{room.eligible && <button className="button button-small button-primary" onClick={() => void onConfirmRoom(selected.id, room.roomId)}>Confirm</button>}</td></tr>)}</tbody></table></div>
           {!eligible.length && <EmptyState icon={<DoorOpen />} title="No suitable room found" description="Review required facilities, expected attendance, or the event time." />}
           {!!eligible.length && selected.roomId && <div className="success-banner"><CheckCircle2 size={18} /> Room allocation confirmed. Review the event and publish when ready.</div>}
         </>
@@ -1077,35 +1184,43 @@ function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflicts
   );
 }
 
-function AnalyticsPage({ events }: { events: CampusEvent[] }) {
+function AnalyticsPage() {
   const [data, setData] = useState<{
-    totals: { totalEvents: number; upcomingEvents: number; registeredStudents: number; attendanceRate: number };
-    categories: Array<{ category: string; count: number }>;
-    predictions: Array<{ event: CampusEvent; estimate: number; lowerBound: number; upperBound: number; historySamples: number }>;
-    roomUtilization: { configuredRooms: number; currentlyBookedRooms: number };
-    predictionMethod: string;
+    kpis: { totalAttendance: number; attendancePercentage: number; mostActiveFaculty: string; mostPopularEvent: string };
+    studentParticipation: { participants: number; students: number; rate: number };
+    attendanceTrends: Array<{ day: string; count: number }>;
+    attendancePerFaculty: Array<{ faculty: string; count: number }>;
+    popularEvents: Array<{ id: string; title: string; registrations: number; attendance: number }>;
   } | null>(null);
   const [error, setError] = useState('');
   useEffect(() => {
-    api<typeof data>('/organizer/analytics').then(setData).catch((reason) => setError(reason instanceof Error ? reason.message : 'Could not load analytics.'));
-  }, [events.length]);
-  const max = Math.max(1, ...(data?.categories.map((item) => item.count) ?? []));
+    api<typeof data>('/organizer/attendance-analytics').then(setData).catch((reason) => setError(reason instanceof Error ? reason.message : 'Could not load attendance analytics.'));
+  }, []);
+  const days = Array.from({ length: 7 }, (_, index) => {
+    const day = new Date();
+    day.setDate(day.getDate() - (6 - index));
+    return day.toISOString().slice(0, 10);
+  });
+  const trend = days.map((day) => ({ day, count: data?.attendanceTrends.find((item) => item.day === day)?.count ?? 0 }));
+  const trendMax = Math.max(1, ...trend.map((item) => item.count));
+  const facultyMax = Math.max(1, ...(data?.attendancePerFaculty.map((item) => item.count) ?? []));
+  const popularMax = Math.max(1, ...(data?.popularEvents.map((item) => item.registrations) ?? []));
   return (
     <div className="page-stack">
-      <PageTitle eyebrow="A CLEARER PICTURE" title="Event analytics" description="A few signals to help you plan the next campus moment." />
+      <PageTitle eyebrow="SCREEN 14" title="Attendance analytics" description="Track event check-ins, student participation, and campus engagement." />
       {error && <div className="form-error" role="alert">{error}</div>}
-      <div className="dashboard-stats">{[
-        ['Total events', data?.totals.totalEvents ?? events.length, <CalendarDays />],
-        ['Upcoming events', data?.totals.upcomingEvents ?? 0, <Clock3 />],
-        ['Registered students', data?.totals.registeredStudents ?? 0, <Users />],
-        ['Historical turnout', `${data?.totals.attendanceRate ?? 0}%`, <ArrowUpRight />],
-      ].map(([label, value, icon], index) => <StatCard key={String(label)} label={String(label)} value={String(value)} detail={index === 3 ? 'Seeded sample history' : 'Across the campus'} icon={icon as ReactNode} tone={['blue', 'lavender', 'green', 'amber'][index]} />)}</div>
-      <div className="analytics-grid">
-        <section className="panel analytics-panel"><div className="panel-heading"><div><p className="eyebrow">WHAT’S DRAWING INTEREST</p><h2>Popular categories</h2></div><span className="panel-icon"><Heart size={18} /></span></div>{data?.categories.length ? <div className="bar-list">{data.categories.map((item) => <div className="bar-row" key={item.category}><div><span>{item.category}</span><b>{item.count}</b></div><div className="bar-track"><i style={{ width: `${Math.max(8, item.count / max * 100)}%` }} /></div></div>)}</div> : <p className="muted">Category activity will appear as events are published.</p>}</section>
-        <section className="panel analytics-panel"><div className="panel-heading"><div><p className="eyebrow">SPACE PLANNING</p><h2>Room utilization</h2></div><span className="panel-icon"><DoorOpen size={18} /></span></div><div className="utilization-empty"><div className="utilization-ring"><span>{data?.roomUtilization.configuredRooms ?? 0}<small> rooms</small></span></div><p>{data?.roomUtilization.configuredRooms ? `${data.roomUtilization.currentlyBookedRooms} currently booked` : 'Waiting for verified room inventory'}</p></div></section>
+      <div className="attendance-kpis">
+        <div className="attendance-kpi"><StatCard label="Total attendance" value={String(data?.kpis.totalAttendance ?? 0)} detail="Verified event check-ins" icon={<Users />} tone="blue" /></div>
+        <div className="attendance-kpi"><StatCard label="Attendance percentage" value={`${data?.kpis.attendancePercentage ?? 0}%`} detail="Check-ins of confirmed registrations" icon={<ArrowUpRight />} tone="lavender" /></div>
+        <div className="attendance-kpi"><StatCard label="Most active faculty" value={data?.kpis.mostActiveFaculty ?? '—'} detail="By student check-ins" icon={<Heart />} tone="green" /></div>
+        <div className="attendance-kpi"><StatCard label="Most popular event" value={data?.kpis.mostPopularEvent ?? '—'} detail="By confirmed registrations" icon={<Sparkles />} tone="amber" /></div>
       </div>
-      <section className="panel prediction-panel"><div className="panel-heading"><div><p className="eyebrow">PLAN WITH CONTEXT</p><h2>Attendance predictions</h2></div><span className="prediction-badge"><Sparkles size={14} /> Estimate, not a promise</span></div><p className="muted">{data?.predictionMethod ?? 'Confirmed registrations multiplied by seeded historical check-in rate.'}</p>{data?.predictions.map((item) => <div className="prediction-row" key={item.event.id}><div><b>{item.event.title}</b><small>{item.historySamples} historical sample events</small></div><div className="prediction-range"><strong>{item.estimate}</strong><span>{item.lowerBound}–{item.upperBound} expected</span></div></div>)}</section>
-      <p className="disclaimer"><ShieldCheck size={15} /> Estimates use fictional seeded history. Room statistics remain unavailable until verified inventory is provided.</p>
+      <div className="analytics-grid">
+        <section className="panel analytics-panel"><div className="panel-heading"><div><p className="eyebrow">CHECK-INS OVER TIME</p><h2>Attendance trends</h2></div><span className="panel-icon"><CalendarDays size={18} /></span></div><div className="bar-list">{trend.map((item) => <div className="bar-row" key={item.day}><div><span>{new Intl.DateTimeFormat('en-KE', { weekday: 'short', day: 'numeric', timeZone: 'UTC' }).format(new Date(`${item.day}T12:00:00Z`))}</span><b>{item.count}</b></div><div className="bar-track"><i style={{ width: `${item.count ? Math.max(4, item.count / trendMax * 100) : 0}%` }} /></div></div>)}</div></section>
+        <section className="panel analytics-panel"><div className="panel-heading"><div><p className="eyebrow">WHO IS SHOWING UP</p><h2>Attendance per faculty</h2></div><span className="panel-icon"><GraduationCap size={18} /></span></div>{data?.attendancePerFaculty.length ? <div className="bar-list">{data.attendancePerFaculty.map((item) => <div className="bar-row" key={item.faculty}><div><span>{item.faculty}</span><b>{item.count}</b></div><div className="bar-track"><i style={{ width: `${Math.max(5, item.count / facultyMax * 100)}%` }} /></div></div>)}</div> : <p className="muted">Faculty attendance will appear after students check in.</p>}</section>
+        <section className="panel analytics-panel"><div className="panel-heading"><div><p className="eyebrow">BY CONFIRMED REGISTRATIONS</p><h2>Most popular events</h2></div><span className="panel-icon"><Sparkles size={18} /></span></div>{data?.popularEvents.length ? <div className="bar-list">{data.popularEvents.map((item) => <div className="bar-row" key={item.id}><div><span>{item.title}</span><b>{item.registrations}</b></div><div className="bar-track"><i style={{ width: `${Math.max(5, item.registrations / popularMax * 100)}%` }} /></div><small className="analytics-bar-note">{item.attendance} checked in</small></div>)}</div> : <p className="muted">Popular events will appear after students register.</p>}</section>
+        <section className="panel analytics-panel participation-panel"><div className="panel-heading"><div><p className="eyebrow">STUDENT ENGAGEMENT</p><h2>Student participation rate</h2></div><span className="panel-icon"><Users size={18} /></span></div><div className="participation-content"><div className="participation-ring" style={{ '--participation': `${data?.studentParticipation.rate ?? 0}%` } as React.CSSProperties}><span>{data?.studentParticipation.rate ?? 0}<small>%</small></span></div><div><strong>{data?.studentParticipation.participants ?? 0} of {data?.studentParticipation.students ?? 0} students</strong><p>Students with at least one verified event check-in.</p></div></div></section>
+      </div>
     </div>
   );
 }
@@ -1149,7 +1264,7 @@ function AdminUsersPage() {
     <PageTitle eyebrow="ACCOUNT DIRECTORY" title="Manage users" description="Review student, organizer, and administrator accounts. Deactivated accounts can no longer sign in." />
     {error && <div className="form-error" role="alert">{error}</div>}
     {users.length ? <div className="admin-user-list">{users.map((user) => <article className="admin-user-card" key={user.id}>
-      <span className="avatar">{initials(user.displayName)}</span><div className="admin-user-copy"><b>{user.displayName}</b><small>{user.email}</small><small>{[user.course, user.faculty].filter(Boolean).join(' · ') || 'No faculty or course entered'}</small></div>
+      <span className="avatar">{initials(user.displayName)}</span><div className="admin-user-copy"><b>{user.displayName}</b><small>{user.email}</small><small>{[user.course, user.faculty].filter(Boolean).join(' · ') || 'No faculty or course entered'}</small>{user.registrationNo && <small>Registration No: {user.registrationNo}</small>}</div>
       <div className="admin-user-flags"><span className={`status-pill ${user.isActive ? 'status-on' : 'status-error'}`}>{user.isActive ? 'Active' : 'Inactive'}</span>{user.adminEnabled ? <span className="role-pill">Administrator</span> : user.organizerEnabled || user.role === 'organizer' ? <span className="role-pill">Organizer</span> : <span className="role-pill">Student</span>}</div>
       {!user.adminEnabled && <button className={`button button-small ${user.isActive ? 'button-secondary' : 'button-primary'}`} disabled={busyId === user.id} onClick={() => void toggleActive(user)}>{busyId === user.id ? 'Saving…' : user.isActive ? 'Deactivate' : 'Reactivate'}</button>}
     </article>)}</div> : <div className="loading-panel">Loading accounts…</div>}
@@ -1249,6 +1364,7 @@ export default function App() {
   const [account, setAccount] = useState<Account | null>(null);
   const [workspace, setWorkspace] = useState<'student' | 'organizer' | 'administrator'>('student');
   const [screen, setScreen] = useState<Screen>('landing');
+  const [screenHistory, setScreenHistory] = useState<Screen[]>([]);
   const [events, setEvents] = useState<CampusEvent[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
@@ -1295,11 +1411,40 @@ export default function App() {
 
   useEffect(() => {
     api<{ account: Account }>('/auth/me')
-      .then(async (result) => { setAccount(result.account); setWorkspace(result.account.adminEnabled ? 'administrator' : result.account.role === 'organizer' ? 'organizer' : 'student'); setScreen('dashboard'); await loadData(result.account); })
+      .then(async (result) => { setAccount(result.account); setWorkspace(result.account.adminEnabled ? 'administrator' : result.account.organizerEnabled ? 'organizer' : 'student'); setScreen('dashboard'); await loadData(result.account); })
       .catch(() => undefined)
       .finally(() => setBusy(false));
     api<{ events: CampusEvent[] }>('/events').then((result) => setEvents(result.events)).catch(() => undefined);
   }, [loadData]);
+
+  useEffect(() => {
+    if (!account) return;
+    const refreshPermissions = async () => {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const result = await api<{ account: Account }>('/auth/me');
+        const updated = result.account;
+        const justApproved = !account.organizerEnabled && updated.organizerEnabled;
+        setAccount(updated);
+        if (justApproved && !updated.adminEnabled) {
+          setWorkspace('organizer');
+          setScreen('dashboard');
+          await loadData(updated);
+        } else if (workspace === 'organizer' || workspace === 'administrator') {
+          const refreshed = await api<{ events: CampusEvent[] }>('/events');
+          setEvents(refreshed.events);
+        }
+      } catch {
+        // The active session may have expired; normal sign-in handling remains available.
+      }
+    };
+    window.addEventListener('focus', refreshPermissions);
+    document.addEventListener('visibilitychange', refreshPermissions);
+    return () => {
+      window.removeEventListener('focus', refreshPermissions);
+      document.removeEventListener('visibilitychange', refreshPermissions);
+    };
+  }, [account, loadData, workspace]);
 
   const flash = (message: string) => {
     setToast(message);
@@ -1308,6 +1453,7 @@ export default function App() {
 
   const navigate = (next: Screen) => {
     if (next === 'create' && screen !== 'details') setSelectedId('');
+    if (next !== screen) setScreenHistory((history) => [...history, screen]);
     setScreen(next);
     setMoreNavOpen(secondaryNav.some(({ id }) => id === next));
     setMobileMenu(false);
@@ -1320,10 +1466,19 @@ export default function App() {
     }
   };
 
+  const goBack = () => {
+    const previous = screenHistory[screenHistory.length - 1];
+    if (!previous) return;
+    setScreenHistory((history) => history.slice(0, -1));
+    setScreen(previous);
+    setError('');
+  };
+
   const handleAuth = async (nextAccount: Account) => {
     setAccount(nextAccount);
-    setWorkspace(nextAccount.adminEnabled ? 'administrator' : nextAccount.role === 'organizer' ? 'organizer' : 'student');
+    setWorkspace(nextAccount.adminEnabled ? 'administrator' : nextAccount.organizerEnabled ? 'organizer' : 'student');
     setAuthMode(null);
+    setScreenHistory([]);
     setScreen('dashboard');
     try { await loadData(nextAccount); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Some data could not be loaded.'); }
     flash(`Welcome to CampusConnect, ${nextAccount.displayName.split(' ')[0]}.`);
@@ -1333,6 +1488,7 @@ export default function App() {
     await api('/auth/logout', { method: 'POST' });
     setAccount(null);
     setWorkspace('student');
+    setScreenHistory([]);
     setScreen('landing');
     setEvents([]);
     setRecommendations([]);
@@ -1373,7 +1529,7 @@ export default function App() {
     });
     const refreshed = await api<{ events: CampusEvent[] }>('/events');
     setEvents(refreshed.events);
-    flash('Draft saved.');
+    flash(screen === 'create' && selectedEvent?.status === 'published' ? 'Event updates saved.' : 'Draft saved.');
     return result.event;
   };
 
@@ -1383,8 +1539,7 @@ export default function App() {
       const refreshed = await api<{ events: CampusEvent[] }>('/events');
       setEvents(refreshed.events);
       setSelectedId(event.id);
-      setScreen('details');
-      setMoreNavOpen(false);
+      navigate('details');
       flash('Your event is now published.');
     } catch (reason) {
       flash(reason instanceof Error ? reason.message : 'The event could not be published.');
@@ -1405,7 +1560,7 @@ export default function App() {
 
   const openEvent = (event: CampusEvent) => {
     setSelectedId(event.id);
-    setScreen('details');
+    navigate('details');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -1415,8 +1570,7 @@ export default function App() {
       const refreshed = await api<{ events: CampusEvent[] }>('/events');
       setEvents(refreshed.events);
       setSelectedId(eventId);
-      setScreen('publish');
-      setMoreNavOpen(false);
+      navigate('publish');
       flash('Room confirmed. Review the event before publishing.');
     } catch (reason) {
       flash(reason instanceof Error ? reason.message : 'Room allocation failed.');
@@ -1457,20 +1611,22 @@ export default function App() {
   const activeEvent = selectedEvent;
   const unread = notifications.filter((item) => !item.readAt).length;
   const content = (() => {
-    if (screen === 'details' && activeEvent) return <EventDetails event={activeEvent} account={account} saved={savedIds.includes(activeEvent.id)} organizerWorkspace={organizer} onSave={() => toggleSaved(activeEvent.id)} onRegister={() => void register(activeEvent)} onCancelRegistration={() => void cancelRegistration(activeEvent)} onBack={() => navigate(organizer ? 'events' : 'discover')} onEdit={() => { setSelectedId(activeEvent.id); navigate('create'); }} />;
+    if (screen === 'details' && activeEvent) return <EventDetails event={activeEvent} account={account} saved={savedIds.includes(activeEvent.id)} organizerWorkspace={organizer} onSave={() => toggleSaved(activeEvent.id)} onRegister={() => void register(activeEvent)} onCancelRegistration={() => void cancelRegistration(activeEvent)} onBack={goBack} onEdit={() => { setSelectedId(activeEvent.id); navigate('create'); }} />;
     if (screen === 'publish') return <PublishEventPage event={selectedEvent} onPublish={(event) => void publishEvent(event)} onEdit={(event) => { setSelectedId(event.id); navigate('create'); }} />;
     if (screen === 'discover') return <DiscoveryPage events={events} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} savedIds={savedIds} />;
     if (screen === 'calendar') return <CalendarPage events={events} onOpen={openEvent} />;
+    if (screen === 'registered') return <RegisteredEventsPage events={events} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} savedIds={savedIds} onBack={goBack} />;
+    if (screen === 'saved') return <SavedEventsPage events={events} savedIds={savedIds} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} onDiscover={() => navigate('discover')} />;
     if (screen === 'recommendations') return <RecommendationsPage items={recommendations} onOpen={openEvent} onRegister={(event) => void register(event)} />;
     if (screen === 'notifications') return <NotificationsPage notifications={notifications} onRead={(item) => void markRead(item)} />;
     if (screen === 'applications') return <OrganizerApplicationsPage account={account} canReview={administrator} onAccountUpdated={setAccount} />;
     if (screen === 'admin-users' && administrator) return <AdminUsersPage />;
     if (screen === 'profile') return <ProfilePage account={account} onUpdate={updateProfile} />;
     if (screen === 'events') return <OrganizerEventsPage events={events} onOpen={openEvent} onNavigate={navigate} onPublish={(event) => void publishEvent(event)} onCancel={(event) => void cancelEvent(event)} />;
-    if (screen === 'create') return <CreateEventPage key={selectedEvent?.id ?? 'new'} editing={selectedEvent} onSave={createOrUpdateEvent} onRooms={(event) => { setSelectedId(event.id); navigate('rooms'); }} onPublishReview={(event) => { setSelectedId(event.id); navigate('publish'); }} />;
+    if (screen === 'create') return <CreateEventPage key={selectedEvent?.id ?? 'new'} editing={selectedEvent} onSave={createOrUpdateEvent} onRooms={(event) => { setSelectedId(event.id); navigate('rooms'); }} onPublishReview={(event) => { setSelectedId(event.id); navigate('publish'); }} onDone={(event) => { setSelectedId(event.id); navigate('details'); }} onCancel={goBack} />;
     if (screen === 'rooms' && administrator) return <AdminRoomsPage />;
     if (screen === 'rooms' || screen === 'conflicts') return <RoomsPage events={events} selectedId={selectedId} onSelectEvent={setSelectedId} onConfirmRoom={confirmRoom} conflictsOnly={screen === 'conflicts'} />;
-    if (screen === 'analytics') return <AnalyticsPage events={events} />;
+    if (screen === 'analytics') return <AnalyticsPage />;
     if (administrator) return <AdministratorDashboard onNavigate={navigate} />;
     if (organizer) return <OrganizerDashboard events={events} onNavigate={navigate} onOpen={openEvent} />;
     return <StudentDashboard account={account} events={events} recommendations={recommendations} onNavigate={navigate} onOpen={openEvent} onRegister={(event) => void register(event)} savedIds={savedIds} onSave={toggleSaved} />;
@@ -1501,7 +1657,7 @@ export default function App() {
       </aside>
       {mobileMenu && <button className="mobile-backdrop" onClick={() => setMobileMenu(false)} aria-label="Close menu" />}
       <main className="main-shell">
-        <header className="topbar"><button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={20} /></button><div className="breadcrumb"><span>CampusConnect</span><ChevronRight size={14} /><b>{screen === 'dashboard' ? 'Overview' : screen.replace('-', ' ')}</b></div><div className="topbar-actions">{(hasOrganizerWorkspace || hasAdminWorkspace) && <select className="workspace-switch" aria-label="Workspace" value={workspace} onChange={(event) => { setWorkspace(event.target.value as 'student' | 'organizer' | 'administrator'); setScreen('dashboard'); setMoreNavOpen(false); }}>{account.role === 'student' && <option value="student">Student</option>}{hasOrganizerWorkspace && <option value="organizer">Organizer</option>}{hasAdminWorkspace && <option value="administrator">Administrator</option>}</select>}<span className="local-time-pill"><span /> Africa/Nairobi</span><button className="icon-button notification-button" onClick={() => navigate('notifications')} aria-label={`${unread} unread notifications`}><Bell size={18} />{unread > 0 && <i>{unread}</i>}</button><button className="topbar-profile" onClick={() => navigate('profile')}><span className="avatar">{initials(account.displayName)}</span><ChevronDown size={14} /></button><button className="icon-button signout-button" onClick={() => void signOut()} aria-label="Sign out"><LogOut size={17} /></button></div></header>
+        <header className="topbar"><button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={20} /></button>{screenHistory.length > 0 && <button className="app-back-button" onClick={goBack}><ChevronLeft size={17} />Back</button>}<div className="breadcrumb"><span>CampusConnect</span><ChevronRight size={14} /><b>{screen === 'dashboard' ? 'Overview' : screen.replace('-', ' ')}</b></div><div className="topbar-actions">{(hasOrganizerWorkspace || hasAdminWorkspace) && <select className="workspace-switch" aria-label="Workspace" value={workspace} onChange={(event) => { const next = event.target.value as 'student' | 'organizer' | 'administrator'; setWorkspace(next); setScreenHistory([]); setScreen('dashboard'); setMoreNavOpen(false); api<{ events: CampusEvent[] }>('/events').then((result) => setEvents(result.events)).catch((reason) => setError(reason.message)); }}>{account.role === 'student' && <option value="student">Student</option>}{hasOrganizerWorkspace && <option value="organizer">Organizer</option>}{hasAdminWorkspace && <option value="administrator">Administrator</option>}</select>}<span className="local-time-pill"><span /> Africa/Nairobi</span><button className="icon-button notification-button" onClick={() => navigate('notifications')} aria-label={`${unread} unread notifications`}><Bell size={18} />{unread > 0 && <i>{unread}</i>}</button><button className="topbar-profile" onClick={() => navigate('profile')}><span className="avatar">{initials(account.displayName)}</span><ChevronDown size={14} /></button><button className="icon-button signout-button" onClick={() => void signOut()} aria-label="Sign out"><LogOut size={17} /></button></div></header>
         <div className="main-content">
           {error && <div className="inline-error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss error"><X size={15} /></button></div>}
           {content}

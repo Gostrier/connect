@@ -25,6 +25,7 @@ db.exec(`
     is_active INTEGER NOT NULL DEFAULT 1,
     faculty TEXT,
     course TEXT,
+    registration_no TEXT,
     interests TEXT NOT NULL DEFAULT '[]',
     clubs TEXT NOT NULL DEFAULT '[]',
     personalization_enabled INTEGER NOT NULL DEFAULT 1,
@@ -115,7 +116,8 @@ db.exec(`
     latitude REAL NOT NULL,
     longitude REAL NOT NULL,
     opened_at TEXT NOT NULL,
-    closed_at TEXT
+    closed_at TEXT,
+    check_in_code TEXT
   );
 
   CREATE TABLE IF NOT EXISTS attendance_records (
@@ -126,6 +128,7 @@ db.exec(`
     email_snapshot TEXT NOT NULL DEFAULT '',
     faculty_snapshot TEXT,
     course_snapshot TEXT,
+    registration_no_snapshot TEXT,
     checked_in_at TEXT NOT NULL,
     UNIQUE (event_id, account_id)
   );
@@ -156,6 +159,10 @@ if (!eventColumns.some((column) => column.name === 'venue_label')) {
 }
 
 const accountColumns = db.pragma('table_info(accounts)') as Array<{ name: string }>;
+if (!accountColumns.some((column) => column.name === 'registration_no')) {
+  db.exec('ALTER TABLE accounts ADD COLUMN registration_no TEXT');
+}
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS accounts_registration_no_unique ON accounts(registration_no) WHERE registration_no IS NOT NULL AND registration_no != ''");
 if (!accountColumns.some((column) => column.name === 'organizer_enabled')) {
   db.exec('ALTER TABLE accounts ADD COLUMN organizer_enabled INTEGER NOT NULL DEFAULT 0');
 }
@@ -170,6 +177,10 @@ if (!accountColumns.some((column) => column.name === 'in_app_preferences')) {
 }
 
 const attendanceRecordColumns = db.pragma('table_info(attendance_records)') as Array<{ name: string }>;
+const attendanceSessionColumns = db.pragma('table_info(attendance_sessions)') as Array<{ name: string }>;
+if (!attendanceSessionColumns.some((column) => column.name === 'check_in_code')) {
+  db.exec('ALTER TABLE attendance_sessions ADD COLUMN check_in_code TEXT');
+}
 if (!attendanceRecordColumns.some((column) => column.name === 'display_name_snapshot')) {
   db.exec("ALTER TABLE attendance_records ADD COLUMN display_name_snapshot TEXT NOT NULL DEFAULT ''");
 }
@@ -182,12 +193,16 @@ if (!attendanceRecordColumns.some((column) => column.name === 'faculty_snapshot'
 if (!attendanceRecordColumns.some((column) => column.name === 'course_snapshot')) {
   db.exec('ALTER TABLE attendance_records ADD COLUMN course_snapshot TEXT');
 }
+if (!attendanceRecordColumns.some((column) => column.name === 'registration_no_snapshot')) {
+  db.exec('ALTER TABLE attendance_records ADD COLUMN registration_no_snapshot TEXT');
+}
 db.exec(`
   UPDATE attendance_records
   SET display_name_snapshot = COALESCE((SELECT display_name FROM accounts WHERE accounts.id = attendance_records.account_id), ''),
       email_snapshot = COALESCE((SELECT email FROM accounts WHERE accounts.id = attendance_records.account_id), ''),
       faculty_snapshot = (SELECT faculty FROM accounts WHERE accounts.id = attendance_records.account_id),
-      course_snapshot = (SELECT course FROM accounts WHERE accounts.id = attendance_records.account_id)
+      course_snapshot = (SELECT course FROM accounts WHERE accounts.id = attendance_records.account_id),
+      registration_no_snapshot = (SELECT registration_no FROM accounts WHERE accounts.id = attendance_records.account_id)
   WHERE display_name_snapshot = '' OR email_snapshot = ''
 `);
 

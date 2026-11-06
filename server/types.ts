@@ -10,6 +10,7 @@ export interface Account {
   isActive: boolean;
   faculty: string | null;
   course: string | null;
+  registrationNo: string | null;
   interests: string[];
   clubs: string[];
   personalizationEnabled: boolean;

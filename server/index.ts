@@ -3,7 +3,7 @@ import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { db, loadVerifiedRoomInventory } from './db.js';
 import type { Account, AccountRole, EventRecord } from './types.js';
@@ -30,6 +30,7 @@ type AccountRow = {
   is_active: number;
   faculty: string | null;
   course: string | null;
+  registration_no: string | null;
   interests: string;
   clubs: string;
   personalization_enabled: number;
@@ -51,6 +52,7 @@ function mapAccount(row: AccountRow): Account {
     isActive: row.is_active === 1,
     faculty: row.faculty,
     course: row.course,
+    registrationNo: row.registration_no,
     interests: JSON.parse(row.interests) as string[],
     clubs: JSON.parse(row.clubs) as string[],
     personalizationEnabled: row.personalization_enabled === 1,
@@ -60,6 +62,15 @@ function mapAccount(row: AccountRow): Account {
 
 function accountById(id: string): Account | undefined {
   const row = db.prepare('SELECT * FROM accounts WHERE id = ?').get(id) as AccountRow | undefined;
+  // Preserve Organizer access for accounts that already own real events if a
+  // stale account flag was lost while the event data remained in SQLite.
+  if (row && row.role === 'student' && row.organizer_enabled !== 1) {
+    const ownsEvent = db.prepare('SELECT 1 FROM events WHERE organizer_id = ? AND is_demo = 0 LIMIT 1').get(id);
+    if (ownsEvent) {
+      db.prepare('UPDATE accounts SET organizer_enabled = 1 WHERE id = ?').run(id);
+      row.organizer_enabled = 1;
+    }
+  }
   return row ? mapAccount(row) : undefined;
 }
 
@@ -165,6 +176,32 @@ const eventSelect = `
   JOIN accounts a ON a.id = e.organizer_id
 `;
 
+function attendanceForecast(category: string, registrations: number, expectedAttendance: number, capacity: number): { estimate: number; rate: number; sampleEvents: number } {
+  const history = db.prepare(`
+    SELECT e.category, SUM(h.registered) AS registered, SUM(h.attended) AS attended, COUNT(*) AS samples
+    FROM (
+      SELECT event_id, MAX(registration_count) AS registered, MAX(check_in_count) AS attended
+      FROM attendance_history GROUP BY event_id
+    ) h JOIN events e ON e.id = h.event_id
+    GROUP BY e.category
+  `).all() as Array<{ category: string; registered: number; attended: number; samples: number }>;
+  const registeredTotal = history.reduce((sum, row) => sum + row.registered, 0);
+  const attendedTotal = history.reduce((sum, row) => sum + row.attended, 0);
+  const globalRate = registeredTotal ? attendedTotal / registeredTotal : 0.72;
+  const categoryHistory = history.find((row) => row.category === category);
+  const categoryRate = categoryHistory && categoryHistory.registered
+    ? categoryHistory.attended / categoryHistory.registered
+    : globalRate;
+  const categoryWeight = categoryHistory ? categoryHistory.registered / (categoryHistory.registered + 20) : 0;
+  const rate = Math.max(0, Math.min(1, categoryRate * categoryWeight + globalRate * (1 - categoryWeight)));
+  const base = registrations > 0 ? registrations : expectedAttendance;
+  return {
+    estimate: Math.min(capacity, Math.max(0, Math.round(base * rate))),
+    rate,
+    sampleEvents: categoryHistory?.samples ?? 0,
+  };
+}
+
 function createNotification(accountId: string, eventId: string | null, kind: string, message: string): void {
   const account = db.prepare('SELECT in_app_preferences FROM accounts WHERE id = ?').get(accountId) as { in_app_preferences: string } | undefined;
   const preferences = account ? parseJson<Record<string, boolean>>(account.in_app_preferences) : {};
@@ -184,11 +221,31 @@ function notifyEventRegistrants(eventId: string, kind: string, message: string):
   }
 }
 
+function notifyStudentsAboutRecommendedEvent(eventId: string): void {
+  const event = db.prepare('SELECT id, title, category, faculty, club_name, start_at FROM events WHERE id = ? AND status = ?')
+    .get(eventId, 'published') as { id: string; title: string; category: string; faculty: string; club_name: string | null; start_at: string } | undefined;
+  if (!event) return;
+  const students = db.prepare(`SELECT id, faculty, interests, clubs FROM accounts
+    WHERE role = 'student' AND is_active = 1 AND personalization_enabled = 1`).all() as Array<{ id: string; faculty: string | null; interests: string; clubs: string }>;
+  const mark = db.prepare('INSERT OR IGNORE INTO notification_markers (event_id, account_id, kind, created_at) VALUES (?, ?, ?, ?)');
+  for (const student of students) {
+    if (student.faculty !== event.faculty
+      && !parseJson<string[]>(student.interests).includes(event.category)
+      && !(event.club_name && parseJson<string[]>(student.clubs).includes(event.club_name))) continue;
+    const registered = db.prepare(`SELECT 1 FROM registrations WHERE event_id = ? AND account_id = ? AND status IN ('registered', 'waitlisted')`)
+      .get(event.id, student.id);
+    if (registered) continue;
+    const marked = mark.run(event.id, student.id, 'recommendation', new Date().toISOString());
+    if (marked.changes) createNotification(student.id, event.id, 'recommendation', `${event.title} is a new event you may like.`);
+  }
+}
+
 const signupSchema = z.object({
   email: z.string().email().max(120).refine((value) => value.toLowerCase().endsWith('.test'), 'Use a synthetic .test email for this presentation prototype.'),
   displayName: z.string().trim().min(2).max(80),
   faculty: z.string().trim().min(1).max(120),
   course: z.string().trim().min(1).max(120),
+  registrationNo: z.string().trim().min(2).max(40),
   password: z.string().min(10).max(128),
   confirmPassword: z.string().min(10).max(128),
 }).refine((value) => value.password === value.confirmPassword, {
@@ -204,10 +261,14 @@ app.post('/api/auth/signup', (req, res) => {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the sign-up details.' });
     return;
   }
-  const { email, displayName, faculty, course, password } = parsed.data;
+  const { email, displayName, faculty, course, registrationNo, password } = parsed.data;
   const normalizedEmail = email.toLowerCase();
   if (db.prepare('SELECT 1 FROM accounts WHERE email = ?').get(normalizedEmail)) {
     res.status(409).json({ error: 'An account already uses that email.' });
+    return;
+  }
+  if (db.prepare('SELECT 1 FROM accounts WHERE registration_no = ?').get(registrationNo)) {
+    res.status(409).json({ error: 'An account already uses that registration number.' });
     return;
   }
 
@@ -216,9 +277,9 @@ app.post('/api/auth/signup', (req, res) => {
   const adminEnabled = configuredAdminEmails.includes(normalizedEmail) ? 1 : 0;
   const createAccount = db.transaction(() => {
     db.prepare(`
-      INSERT INTO accounts (id, email, display_name, password_hash, role, faculty, course, admin_enabled, created_at)
-      VALUES (?, ?, ?, ?, 'student', ?, ?, ?, ?)
-    `).run(accountId, normalizedEmail, displayName, bcrypt.hashSync(password, 10), faculty, course, adminEnabled, createdAt);
+      INSERT INTO accounts (id, email, display_name, password_hash, role, faculty, course, registration_no, admin_enabled, created_at)
+      VALUES (?, ?, ?, ?, 'student', ?, ?, ?, ?, ?)
+    `).run(accountId, normalizedEmail, displayName, bcrypt.hashSync(password, 10), faculty, course, registrationNo, adminEnabled, createdAt);
   });
   try {
     createAccount();
@@ -495,23 +556,19 @@ function validateEventInput(body: unknown, res: Response): z.infer<typeof eventI
     res.status(400).json({ error: 'The event end time must be after its start time.' });
     return undefined;
   }
-  if (Date.parse(input.startAt) <= Date.now()) {
-    res.status(400).json({ error: 'New events must start in the future.' });
-    return undefined;
-  }
-  const closesAt = input.registrationClosesAt
-    ? Date.parse(input.registrationClosesAt)
-    : Date.parse(input.startAt) - 24 * 60 * 60_000;
-  if (closesAt <= Date.now() || closesAt >= Date.parse(input.startAt)) {
-    res.status(400).json({ error: 'Registration must close after now and before the event starts.' });
-    return undefined;
-  }
   return input;
 }
 
 app.post('/api/events', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
   const input = validateEventInput(req.body, res);
   if (!input || !req.account) return;
+  const closesAt = input.registrationClosesAt
+    ? Date.parse(input.registrationClosesAt)
+    : Date.parse(input.startAt) - 24 * 60 * 60_000;
+  if (Date.parse(input.startAt) <= Date.now() || closesAt <= Date.now() || closesAt >= Date.parse(input.startAt)) {
+    res.status(400).json({ error: 'New events must start in the future, with registration closing before the event starts.' });
+    return;
+  }
   const defaultClose = new Date(Date.parse(input.startAt) - 24 * 60 * 60_000).toISOString();
   const id = randomUUID();
   const nowIso = new Date().toISOString();
@@ -534,15 +591,61 @@ app.post('/api/events', requireAuth, requireRole('organizer'), (req: Authenticat
   res.status(201).json({ event: mapEvent(row) });
 });
 
-app.put('/api/events/:id', requireAuth, requireRole('organizer'), (req, res) => {
-  const input = validateEventInput(req.body, res);
-  if (!input) return;
-  const existing = db.prepare('SELECT status FROM events WHERE id = ?').get(req.params.id) as { status: string } | undefined;
-  if (!existing || existing.status === 'cancelled') {
+app.put('/api/events/:id', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const previous = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
+  if (!previous || previous.status === 'cancelled') {
     res.status(404).json({ error: 'Event not found.' });
     return;
   }
-  const previous = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id) as Record<string, unknown>;
+  if (previous.organizer_id !== req.account.id) {
+    res.status(403).json({ error: 'Only this event’s organizer can edit it.' });
+    return;
+  }
+  const input = validateEventInput(req.body, res);
+  if (!input) return;
+  const now = Date.now();
+  const eventStart = Date.parse(String(previous.start_at));
+  const eventEnd = Date.parse(String(previous.end_at));
+  const ongoing = previous.status === 'published' && now >= eventStart && now < eventEnd;
+  if (previous.status === 'published' && now >= eventEnd) {
+    res.status(409).json({ error: 'This event has ended and can no longer be edited.' });
+    return;
+  }
+  if (ongoing) {
+    if (Date.parse(input.startAt) !== eventStart) {
+      res.status(400).json({ error: 'The start time cannot be changed after the event has started.' });
+      return;
+    }
+    if (Date.parse(input.endAt) < eventEnd) {
+      res.status(400).json({ error: 'While an event is ongoing, you can extend its end time but cannot shorten it.' });
+      return;
+    }
+  } else if (Date.parse(input.startAt) <= now) {
+    res.status(400).json({ error: 'An event that has not started must keep a future start time.' });
+    return;
+  }
+  const closesAt = input.registrationClosesAt
+    ? Date.parse(input.registrationClosesAt)
+    : Date.parse(input.startAt) - 24 * 60 * 60_000;
+  const oldClosesAt = Date.parse(String(previous.registration_closes_at));
+  if (ongoing) {
+    if (closesAt !== oldClosesAt && closesAt <= now) {
+      res.status(400).json({ error: 'A new registration closing time must be in the future.' });
+      return;
+    }
+    if (closesAt > Date.parse(input.endAt)) {
+      res.status(400).json({ error: 'Registration must close no later than the event end time.' });
+      return;
+    }
+    if (closesAt < oldClosesAt) {
+      res.status(400).json({ error: 'During an event, registration closing time can only be extended.' });
+      return;
+    }
+  } else if (closesAt <= now || closesAt >= Date.parse(input.startAt)) {
+    res.status(400).json({ error: 'Registration must close after now and before the event starts.' });
+    return;
+  }
   const registrationCapacity = input.registrationCapacity ?? Number(previous.registration_capacity);
   const confirmedCount = db.prepare(`
     SELECT COUNT(*) AS count FROM registrations WHERE event_id = ? AND status = 'registered'
@@ -565,23 +668,24 @@ app.put('/api/events/:id', requireAuth, requireRole('organizer'), (req, res) => 
     const start = Date.parse(input.startAt);
     const end = Date.parse(input.endAt);
     const otherBookings = db.prepare(`
-      SELECT title, start_at, end_at FROM events
-      WHERE room_id = ? AND id != ? AND status != 'cancelled'
-    `).all(previous.room_id, req.params.id) as Array<{ title: string; start_at: string; end_at: string }>;
-    const buffer = room.buffer_minutes * 60_000;
+      SELECT e.title, e.start_at, e.end_at, COALESCE(other_room.buffer_minutes, 0) AS buffer_minutes
+      FROM events e LEFT JOIN rooms other_room ON other_room.id = e.room_id
+      WHERE e.room_id = ? AND e.id != ? AND e.status != 'cancelled'
+    `).all(previous.room_id, req.params.id) as Array<{ title: string; start_at: string; end_at: string; buffer_minutes: number }>;
     const conflict = otherBookings.find((booking) =>
-      start < Date.parse(booking.end_at) + buffer && end + buffer > Date.parse(booking.start_at),
+      start < Date.parse(booking.end_at) + Math.max(room.buffer_minutes, booking.buffer_minutes) * 60_000
+        && end + Math.max(room.buffer_minutes, booking.buffer_minutes) * 60_000 > Date.parse(booking.start_at),
     );
     if (conflict) {
       res.status(409).json({ error: `Room conflict: ${conflict.title} is already booked during that time.` });
       return;
     }
   }
-  if (existing.status === 'published' && input.deliveryMode !== 'online' && !previous.room_id) {
+  if (previous.status === 'published' && input.deliveryMode !== 'online' && !previous.room_id) {
     res.status(409).json({ error: 'A published in-person or hybrid event must keep a confirmed room.' });
     return;
   }
-  if (existing.status === 'published' && input.deliveryMode === 'online' && !input.meetingUrl) {
+  if (previous.status === 'published' && input.deliveryMode === 'online' && !input.meetingUrl) {
     res.status(400).json({ error: 'A published Online event must keep a meeting link.' });
     return;
   }
@@ -600,9 +704,14 @@ app.put('/api/events/:id', requireAuth, requireRole('organizer'), (req, res) => 
     JSON.stringify(input.requiredFacilities),
     input.meetingUrl ?? null, nextRoomId, new Date().toISOString(), req.params.id,
   );
+  const venueChanged = previous.room_id !== nextRoomId || previous.delivery_mode !== input.deliveryMode;
+  if (venueChanged) {
+    notifyEventRegistrants(String(req.params.id), 'venue_changed', `The venue or event format for ${input.title} has changed. Please review the updated details.`);
+  }
   const changed = previous.title !== input.title
     || previous.start_at !== input.startAt
     || previous.end_at !== input.endAt
+    || previous.registration_closes_at !== new Date(closesAt).toISOString()
     || previous.delivery_mode !== input.deliveryMode;
   if (changed) notifyEventRegistrants(String(req.params.id), 'event_changes', 'This event has important updates. Review the new details.');
   const row = db.prepare(`${eventSelect} WHERE e.id = ?`).get(req.params.id) as Record<string, unknown>;
@@ -639,6 +748,7 @@ app.post('/api/events/:id/publish', requireAuth, requireRole('organizer'), (req,
       VALUES (?, ?, ?, 'registered', ?, ?)
     `).run(randomUUID(), req.params.id, String(row.organizer_id), nowIso, nowIso);
   })();
+  notifyStudentsAboutRecommendedEvent(String(req.params.id));
   res.json({ ok: true });
 });
 
@@ -768,8 +878,8 @@ app.get('/api/events/:id/attendance', requireAuth, (req: AuthenticatedRequest, r
     res.status(404).json({ error: 'Event not found.' });
     return;
   }
-  const session = db.prepare('SELECT opened_at, closed_at FROM attendance_sessions WHERE event_id = ?')
-    .get(event.id) as { opened_at: string; closed_at: string | null } | undefined;
+  const session = db.prepare('SELECT opened_at, closed_at, check_in_code FROM attendance_sessions WHERE event_id = ?')
+    .get(event.id) as { opened_at: string; closed_at: string | null; check_in_code: string | null } | undefined;
   const registration = req.account.role === 'student'
     ? db.prepare('SELECT status FROM registrations WHERE event_id = ? AND account_id = ?').get(event.id, req.account.id) as { status: string } | undefined
     : undefined;
@@ -779,13 +889,14 @@ app.get('/api/events/:id/attendance', requireAuth, (req: AuthenticatedRequest, r
   const canManage = (req.account.role === 'organizer' || req.account.organizerEnabled) && event.organizer_id === req.account.id;
   const attendees = canManage ? db.prepare(`
     SELECT display_name_snapshot AS displayName, email_snapshot AS email,
-      faculty_snapshot AS faculty, course_snapshot AS course, checked_in_at AS checkedInAt
+      faculty_snapshot AS faculty, course_snapshot AS course,
+      registration_no_snapshot AS registrationNo, checked_in_at AS checkedInAt
     FROM attendance_records WHERE event_id = ? ORDER BY checked_in_at ASC
   `).all(event.id) : [];
   const now = Date.now();
   const ongoing = event.status === 'published' && now >= Date.parse(event.start_at) && now < Date.parse(event.end_at);
   res.json({
-    session: session ? { status: session.closed_at ? 'closed' : 'open', openedAt: session.opened_at, closedAt: session.closed_at } : { status: 'not_open', openedAt: null, closedAt: null },
+    session: session ? { status: session.closed_at ? 'closed' : 'open', openedAt: session.opened_at, closedAt: session.closed_at, checkInCode: canManage ? session.check_in_code : null } : { status: 'not_open', openedAt: null, closedAt: null, checkInCode: null },
     eventOngoing: ongoing,
     canManage,
     canAttend: req.account.role === 'student' && registration?.status === 'registered',
@@ -824,9 +935,24 @@ app.post('/api/events/:id/attendance/open', requireAuth, requireRole('organizer'
     res.status(400).json({ error: 'Your location is not precise enough. Try again outdoors or enable precise location.' });
     return;
   }
+  const nowIso = new Date().toISOString();
+  const checkInCode = randomBytes(12).toString('hex');
+  const previousSession = db.prepare('SELECT closed_at FROM attendance_sessions WHERE event_id = ?')
+    .get(req.params.id) as { closed_at: string | null } | undefined;
+  if (previousSession && !previousSession.closed_at) {
+    res.status(409).json({ error: 'Attendance is already open.' });
+    return;
+  }
+  if (previousSession?.closed_at) {
+    db.prepare(`UPDATE attendance_sessions SET latitude = ?, longitude = ?, opened_at = ?, closed_at = NULL, check_in_code = ?
+      WHERE event_id = ? AND closed_at IS NOT NULL`)
+      .run(parsed.data.latitude, parsed.data.longitude, nowIso, checkInCode, req.params.id);
+    res.json({ ok: true, reopened: true });
+    return;
+  }
   try {
-    db.prepare('INSERT INTO attendance_sessions (event_id, latitude, longitude, opened_at) VALUES (?, ?, ?, ?)')
-      .run(req.params.id, parsed.data.latitude, parsed.data.longitude, new Date().toISOString());
+    db.prepare('INSERT INTO attendance_sessions (event_id, latitude, longitude, opened_at, check_in_code) VALUES (?, ?, ?, ?, ?)')
+      .run(req.params.id, parsed.data.latitude, parsed.data.longitude, nowIso, checkInCode);
   } catch {
     res.status(409).json({ error: 'Attendance has already been opened or closed for this event.' });
     return;
@@ -867,12 +993,12 @@ app.post('/api/events/:id/attendance/close', requireAuth, requireRole('organizer
 
 app.post('/api/events/:id/attendance/check-in', requireAuth, requireRole('student'), (req: AuthenticatedRequest, res) => {
   if (!req.account) return;
-  const parsed = locationSchema.safeParse(req.body);
+  const parsed = locationSchema.extend({ sessionCode: z.string().min(16).max(64) }).safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Share a valid current location to check in.' });
     return;
   }
-  const event = db.prepare('SELECT status, start_at, end_at FROM events WHERE id = ?').get(req.params.id) as { status: string; start_at: string; end_at: string } | undefined;
+  const event = db.prepare('SELECT status, start_at, end_at, title FROM events WHERE id = ?').get(req.params.id) as { status: string; start_at: string; end_at: string; title: string } | undefined;
   if (!event || event.status !== 'published') {
     res.status(404).json({ error: 'Published event not found.' });
     return;
@@ -888,10 +1014,14 @@ app.post('/api/events/:id/attendance/check-in', requireAuth, requireRole('studen
     res.status(403).json({ error: 'Only students with a confirmed registration can check in.' });
     return;
   }
-  const session = db.prepare('SELECT latitude, longitude, closed_at FROM attendance_sessions WHERE event_id = ?')
-    .get(req.params.id) as { latitude: number; longitude: number; closed_at: string | null } | undefined;
+  const session = db.prepare('SELECT latitude, longitude, closed_at, check_in_code FROM attendance_sessions WHERE event_id = ?')
+    .get(req.params.id) as { latitude: number; longitude: number; closed_at: string | null; check_in_code: string | null } | undefined;
   if (!session || session.closed_at) {
     res.status(409).json({ error: 'The organizer has not opened attendance or has closed it.' });
+    return;
+  }
+  if (!session.check_in_code || parsed.data.sessionCode !== session.check_in_code) {
+    res.status(403).json({ error: 'Scan the current attendance QR code shown by the organizer.' });
     return;
   }
   if (parsed.data.accuracy > 150) {
@@ -906,17 +1036,18 @@ app.post('/api/events/:id/attendance/check-in', requireAuth, requireRole('studen
   try {
     db.prepare(`
       INSERT INTO attendance_records
-        (id, event_id, account_id, display_name_snapshot, email_snapshot, faculty_snapshot, course_snapshot, checked_in_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (id, event_id, account_id, display_name_snapshot, email_snapshot, faculty_snapshot, course_snapshot, registration_no_snapshot, checked_in_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       randomUUID(), req.params.id, req.account.id,
-      req.account.displayName, req.account.email, req.account.faculty, req.account.course,
+      req.account.displayName, req.account.email, req.account.faculty, req.account.course, req.account.registrationNo,
       new Date().toISOString(),
     );
   } catch {
     res.status(409).json({ error: 'You have already checked in to this event.' });
     return;
   }
+  createNotification(req.account.id, String(req.params.id), 'attendance_confirmed', `Your attendance for ${event.title} is confirmed.`);
   res.status(201).json({ ok: true });
 });
 
@@ -931,7 +1062,7 @@ const adminRoomSchema = z.object({
 
 app.get('/api/admin/users', requireAuth, requireRole('administrator'), (_req, res) => {
   const users = db.prepare(`
-    SELECT id, email, display_name AS displayName, role, faculty, course,
+    SELECT id, email, display_name AS displayName, role, faculty, course, registration_no AS registrationNo,
       organizer_enabled AS organizerEnabled, admin_enabled AS adminEnabled,
       is_active AS isActive, created_at AS createdAt
     FROM accounts ORDER BY created_at DESC
@@ -994,7 +1125,7 @@ app.put('/api/admin/rooms/:id', requireAuth, requireRole('administrator'), (req,
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the room details.' });
     return;
   }
-  const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(req.params.id);
+  const room = db.prepare('SELECT id, code, name FROM rooms WHERE id = ?').get(req.params.id) as { id: string; code: string; name: string } | undefined;
   if (!room) {
     res.status(404).json({ error: 'Room not found.' });
     return;
@@ -1018,6 +1149,12 @@ app.put('/api/admin/rooms/:id', requireAuth, requireRole('administrator'), (req,
   } catch {
     res.status(409).json({ error: 'A room with that code already exists.' });
     return;
+  }
+  if (room.name !== parsed.data.name || room.code !== parsed.data.code) {
+    const affected = db.prepare(`SELECT id, title FROM events WHERE room_id = ? AND status = 'published'`).all(req.params.id) as Array<{ id: string; title: string }>;
+    for (const event of affected) {
+      notifyEventRegistrants(event.id, 'venue_changed', `${event.title} venue has changed to ${parsed.data.name} (${parsed.data.code}).`);
+    }
   }
   res.json({ ok: true });
 });
@@ -1047,9 +1184,10 @@ app.get('/api/rooms', (_req, res) => {
   });
 });
 
-app.get('/api/events/:id/room-options', requireAuth, requireRole('organizer'), (req, res) => {
+app.get('/api/events/:id/room-options', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
   const event = db.prepare('SELECT * FROM events WHERE id = ? AND status != ?').get(req.params.id, 'cancelled') as Record<string, unknown> | undefined;
-  if (!event) {
+  if (!event || event.organizer_id !== req.account.id) {
     res.status(404).json({ error: 'Event not found.' });
     return;
   }
@@ -1057,25 +1195,41 @@ app.get('/api/events/:id/room-options', requireAuth, requireRole('organizer'), (
     SELECT * FROM rooms WHERE verified = 1 ORDER BY capacity ASC
   `).all() as Array<{ id: string; code: string; name: string; capacity: number; facilities: string; buffer_minutes: number }>;
   if (!rooms.length) {
-    res.json({ configured: false, recommendations: [], conflicts: [] });
+    res.json({ configured: false, attendanceEstimate: 0, recommendations: [], conflicts: [], eventOverlaps: [] });
     return;
   }
   const required = parseJson<string[]>(String(event.required_facilities));
   const start = Date.parse(String(event.start_at));
   const end = Date.parse(String(event.end_at));
+  const attendanceEstimate = attendanceForecast(String(event.category), 0, Number(event.expected_attendance), Number(event.registration_capacity)).estimate;
+  const eventOverlaps = db.prepare(`
+    SELECT id AS eventId, title AS eventTitle, start_at AS startAt, end_at AS endAt, room_id AS roomId
+    FROM events
+    WHERE id != ? AND status != 'cancelled'
+      AND start_at < ? AND end_at > ?
+      AND (organizer_id = ? OR (club_name IS NOT NULL AND club_name = ?))
+    ORDER BY start_at ASC
+  `).all(req.params.id, String(event.end_at), String(event.start_at), req.account.id, event.club_name ?? '') as Array<{ eventId: string; eventTitle: string; startAt: string; endAt: string; roomId: string | null }>;
   const recommendations = rooms.map((room) => {
     const facilities = parseJson<string[]>(room.facilities);
     const missing = required.filter((facility) => !facilities.includes(facility));
     const overlap = db.prepare(`
-      SELECT e.id, e.title, e.start_at, e.end_at
+      SELECT e.id, e.title, e.start_at, e.end_at, COALESCE(booked_room.buffer_minutes, 0) AS buffer_minutes
       FROM events e
+      LEFT JOIN rooms booked_room ON booked_room.id = e.room_id
       WHERE e.room_id = ? AND e.id != ? AND e.status != 'cancelled'
-    `).all(room.id, req.params.id) as Array<{ id: string; title: string; start_at: string; end_at: string }>;
-    const buffer = room.buffer_minutes * 60_000;
+    `).all(room.id, req.params.id) as Array<{ id: string; title: string; start_at: string; end_at: string; buffer_minutes: number }>;
     const conflict = overlap.find((booking) =>
-      start < Date.parse(booking.end_at) + buffer && end + buffer > Date.parse(booking.start_at),
+      start < Date.parse(booking.end_at) + Math.max(room.buffer_minutes, booking.buffer_minutes) * 60_000
+        && end + Math.max(room.buffer_minutes, booking.buffer_minutes) * 60_000 > Date.parse(booking.start_at),
     );
-    const eligible = room.capacity >= Number(event.expected_attendance) && missing.length === 0 && !conflict;
+    const neededCapacity = Math.max(Number(event.expected_attendance), Number(event.registration_capacity));
+    const eligible = room.capacity >= neededCapacity && missing.length === 0 && !conflict;
+    const utilization = attendanceEstimate / room.capacity;
+    const capacityScore = Math.max(0, 100 - Math.abs(utilization - 0.72) * 100);
+    const facilityScore = required.length ? Math.min(100, 82 + Math.max(0, facilities.length - required.length) * 4) : 82;
+    const availabilityScore = conflict ? 0 : 100;
+    const recommendationScore = Math.round(capacityScore * 0.55 + facilityScore * 0.25 + availabilityScore * 0.2);
     return {
       roomId: room.id,
       code: room.code,
@@ -1083,25 +1237,31 @@ app.get('/api/events/:id/room-options', requireAuth, requireRole('organizer'), (
       capacity: room.capacity,
       facilities,
       missingFacilities: missing,
-      capacityFitScore: Math.round((Number(event.expected_attendance) / room.capacity) * 100),
+      attendanceEstimate,
+      capacityFitScore: Math.round(utilization * 100),
+      recommendationScore,
       conflict: conflict ? { eventId: conflict.id, eventTitle: conflict.title, startAt: conflict.start_at, endAt: conflict.end_at } : null,
       eligible,
       reasons: [
-        room.capacity >= Number(event.expected_attendance) ? 'Fits expected attendance' : 'Too small for expected attendance',
+        room.capacity >= neededCapacity ? `Fits ${neededCapacity} seats` : `Needs ${neededCapacity} seats`,
         missing.length ? `Missing: ${missing.join(', ')}` : 'Required facilities available',
         conflict ? `Conflicts with ${conflict.title}` : 'Available at this time',
+        `${recommendationScore}% overall fit`,
       ],
     };
   });
-  recommendations.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.capacityFitScore - a.capacityFitScore);
+  recommendations.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.recommendationScore - a.recommendationScore);
   res.json({
     configured: true,
+    attendanceEstimate,
     recommendations,
     conflicts: recommendations.filter((room) => room.conflict).map((room) => room.conflict),
+    eventOverlaps,
   });
 });
 
-app.post('/api/events/:id/room', requireAuth, requireRole('organizer'), (req, res) => {
+app.post('/api/events/:id/room', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
   const parsed = z.object({ roomId: z.string().uuid() }).safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'Choose a valid room.' });
@@ -1111,6 +1271,10 @@ app.post('/api/events/:id/room', requireAuth, requireRole('organizer'), (req, re
   const room = db.prepare('SELECT * FROM rooms WHERE id = ? AND verified = 1').get(parsed.data.roomId) as { id: string; capacity: number; facilities: string; buffer_minutes: number } | undefined;
   if (!event || !room) {
     res.status(404).json({ error: 'Draft event or verified room not found.' });
+    return;
+  }
+  if (event.organizer_id !== req.account.id) {
+    res.status(403).json({ error: 'Only this event’s organizer can confirm its room.' });
     return;
   }
   const required = parseJson<string[]>(String(event.required_facilities));
@@ -1127,12 +1291,13 @@ app.post('/api/events/:id/room', requireAuth, requireRole('organizer'), (req, re
   const start = Date.parse(String(event.start_at));
   const end = Date.parse(String(event.end_at));
   const conflict = db.prepare(`
-    SELECT e.title, e.start_at, e.end_at FROM events e
+    SELECT e.title, e.start_at, e.end_at, COALESCE(booked_room.buffer_minutes, 0) AS buffer_minutes FROM events e
+    LEFT JOIN rooms booked_room ON booked_room.id = e.room_id
     WHERE e.room_id = ? AND e.id != ? AND e.status != 'cancelled'
-  `).all(room.id, req.params.id) as Array<{ title: string; start_at: string; end_at: string }>;
-  const buffer = room.buffer_minutes * 60_000;
+  `).all(room.id, req.params.id) as Array<{ title: string; start_at: string; end_at: string; buffer_minutes: number }>;
   const collision = conflict.find((booking) =>
-    start < Date.parse(booking.end_at) + buffer && end + buffer > Date.parse(booking.start_at),
+    start < Date.parse(booking.end_at) + Math.max(room.buffer_minutes, booking.buffer_minutes) * 60_000
+      && end + Math.max(room.buffer_minutes, booking.buffer_minutes) * 60_000 > Date.parse(booking.start_at),
   );
   if (collision) {
     res.status(409).json({ error: `Room conflict: ${collision.title} is already booked during that time.` });
@@ -1238,6 +1403,7 @@ app.patch('/api/me/profile', requireAuth, (req: AuthenticatedRequest, res) => {
   const schema = z.object({
     faculty: z.string().trim().max(120).nullable().optional(),
     course: z.string().trim().max(120).nullable().optional(),
+    registrationNo: z.string().trim().min(2).max(40).nullable().optional(),
     interests: z.array(z.string().trim().min(1).max(80)).max(20).optional(),
     clubs: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
     personalizationEnabled: z.boolean().optional(),
@@ -1250,12 +1416,17 @@ app.patch('/api/me/profile', requireAuth, (req: AuthenticatedRequest, res) => {
   }
   const existing = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.account.id) as AccountRow;
   const input = parsed.data;
+  if (input.registrationNo && db.prepare('SELECT 1 FROM accounts WHERE registration_no = ? AND id != ?').get(input.registrationNo, req.account.id)) {
+    res.status(409).json({ error: 'An account already uses that registration number.' });
+    return;
+  }
   db.prepare(`
-    UPDATE accounts SET faculty = ?, course = ?, interests = ?, clubs = ?, personalization_enabled = ?, in_app_preferences = ?
+    UPDATE accounts SET faculty = ?, course = ?, registration_no = ?, interests = ?, clubs = ?, personalization_enabled = ?, in_app_preferences = ?
     WHERE id = ?
   `).run(
     input.faculty === undefined ? existing.faculty : input.faculty,
     input.course === undefined ? existing.course : input.course,
+    input.registrationNo === undefined ? existing.registration_no : input.registrationNo,
     JSON.stringify(input.interests ?? parseJson<string[]>(existing.interests)),
     JSON.stringify(input.clubs ?? parseJson<string[]>(existing.clubs)),
     input.personalizationEnabled === undefined ? existing.personalization_enabled : Number(input.personalizationEnabled),
@@ -1268,6 +1439,62 @@ app.patch('/api/me/profile', requireAuth, (req: AuthenticatedRequest, res) => {
     return;
   }
   res.json({ account });
+});
+
+app.get('/api/organizer/attendance-analytics', requireAuth, requireRole('organizer', 'administrator'), (_req, res) => {
+  const totalAttendance = (db.prepare(`
+    SELECT COUNT(*) AS count FROM attendance_records a
+    JOIN events e ON e.id = a.event_id WHERE e.status = 'published'
+  `).get() as { count: number }).count;
+  const confirmedRegistrations = (db.prepare(`
+    SELECT COUNT(*) AS count FROM registrations r
+    JOIN events e ON e.id = r.event_id
+    WHERE e.status = 'published' AND r.status = 'registered'
+  `).get() as { count: number }).count;
+  const participation = db.prepare(`
+    SELECT COUNT(DISTINCT a.account_id) AS participants,
+      (SELECT COUNT(*) FROM accounts WHERE role = 'student' AND is_active = 1) AS students
+    FROM attendance_records a JOIN events e ON e.id = a.event_id
+    WHERE e.status = 'published'
+  `).get() as { participants: number; students: number };
+  const facultyRows = db.prepare(`
+    SELECT COALESCE(NULLIF(a.faculty_snapshot, ''), 'Faculty not provided') AS faculty,
+      COUNT(*) AS count
+    FROM attendance_records a JOIN events e ON e.id = a.event_id
+    WHERE e.status = 'published'
+    GROUP BY faculty ORDER BY count DESC, faculty ASC LIMIT 8
+  `).all() as Array<{ faculty: string; count: number }>;
+  const recentTrendRows = db.prepare(`
+    SELECT substr(a.checked_in_at, 1, 10) AS day, COUNT(*) AS count
+    FROM attendance_records a JOIN events e ON e.id = a.event_id
+    WHERE e.status = 'published' AND a.checked_in_at >= ?
+    GROUP BY day ORDER BY day ASC
+  `).all(new Date(Date.now() - 6 * 24 * 60 * 60_000).toISOString()) as Array<{ day: string; count: number }>;
+  const popularEvents = db.prepare(`
+    SELECT e.id, e.title,
+      (SELECT COUNT(*) FROM registrations r WHERE r.event_id = e.id AND r.status = 'registered') AS registrations,
+      (SELECT COUNT(*) FROM attendance_records a WHERE a.event_id = e.id) AS attendance
+    FROM events e WHERE e.status = 'published'
+    ORDER BY registrations DESC, attendance DESC, e.start_at DESC LIMIT 6
+  `).all() as Array<{ id: string; title: string; registrations: number; attendance: number }>;
+  const activeFaculty = facultyRows[0]?.faculty ?? 'No attendance yet';
+  res.json({
+    kpis: {
+      totalAttendance,
+      attendancePercentage: confirmedRegistrations ? Math.min(100, Math.round(totalAttendance / confirmedRegistrations * 100)) : 0,
+      mostActiveFaculty: activeFaculty,
+      mostPopularEvent: popularEvents[0]?.title ?? 'No registrations yet',
+    },
+    registrationDenominator: confirmedRegistrations,
+    studentParticipation: {
+      participants: participation.participants,
+      students: participation.students,
+      rate: participation.students ? Math.round(participation.participants / participation.students * 100) : 0,
+    },
+    attendanceTrends: recentTrendRows,
+    attendancePerFaculty: facultyRows,
+    popularEvents,
+  });
 });
 
 app.get('/api/organizer/analytics', requireAuth, requireRole('organizer', 'administrator'), (_req, res) => {
@@ -1301,9 +1528,9 @@ app.get('/api/organizer/analytics', requireAuth, requireRole('organizer', 'admin
   `).all(new Date().toISOString()) as Array<Record<string, unknown>>;
   const predictions = predictionRows.map((row) => {
     const event = mapEvent(row);
-    const estimate = Math.round(event.registeredCount * turnoutRate);
-    const margin = Math.max(3, Math.round(estimate * (history.samples >= 3 ? 0.15 : 0.3)));
-    return { event, estimate, lowerBound: Math.max(0, estimate - margin), upperBound: Math.min(event.registrationCapacity, estimate + margin), historySamples: history.samples };
+    const forecast = attendanceForecast(event.category, event.registeredCount, event.expectedAttendance, event.registrationCapacity);
+    const margin = Math.max(3, Math.round(forecast.estimate * (forecast.sampleEvents >= 3 ? 0.15 : 0.3)));
+    return { event, estimate: forecast.estimate, attendanceRate: Math.round(forecast.rate * 100), lowerBound: Math.max(0, forecast.estimate - margin), upperBound: Math.min(event.registrationCapacity, forecast.estimate + margin), historySamples: forecast.sampleEvents };
   });
   const rooms = db.prepare('SELECT COUNT(*) AS total FROM rooms WHERE verified = 1').get() as { total: number };
   const bookedRooms = db.prepare(`
@@ -1321,7 +1548,7 @@ app.get('/api/organizer/analytics', requireAuth, requireRole('organizer', 'admin
     registrationTrend: trendRows.reverse(),
     predictions,
     roomUtilization: { configuredRooms: rooms.total, currentlyBookedRooms: bookedRooms.count },
-    predictionMethod: 'Confirmed registrations multiplied by seeded historical check-in rate.',
+    predictionMethod: 'Confirmed registrations multiplied by a smoothed event-category attendance rate, with campus-wide history as a fallback.',
   });
 });
 
@@ -1332,32 +1559,39 @@ app.get('/api/health', (_req, res) => {
 function deliverScheduledInAppNotifications(): void {
   const now = new Date();
   const nowIso = now.toISOString();
-  const reminderStart = new Date(now.getTime() + 23 * 60 * 60_000 + 59 * 60_000).toISOString();
-  const reminderEnd = new Date(now.getTime() + 24 * 60 * 60_000).toISOString();
-  const reminderRows = db.prepare(`
-    SELECT e.id AS event_id, e.title, r.account_id
+  const dayKey = (date: Date) => {
+    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Nairobi', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  };
+  const today = dayKey(now);
+  const tomorrow = dayKey(new Date(now.getTime() + 24 * 60 * 60_000));
+  const tomorrowRows = db.prepare(`
+    SELECT e.id AS event_id, e.title, r.account_id, e.start_at
     FROM events e JOIN registrations r ON r.event_id = e.id
     WHERE e.status = 'published' AND r.status = 'registered'
       AND e.start_at > ? AND e.start_at <= ?
-  `).all(reminderStart, reminderEnd) as Array<{ event_id: string; title: string; account_id: string }>;
-  const closingRows = db.prepare(`
-    SELECT e.id AS event_id, e.title, r.account_id
+  `).all(nowIso, new Date(now.getTime() + 48 * 60 * 60_000).toISOString()) as Array<{ event_id: string; title: string; account_id: string; start_at: string }>;
+  const reminderRows = tomorrowRows.filter((row) => dayKey(new Date(row.start_at)) === tomorrow);
+  const closingTodayRows = db.prepare(`
+    SELECT e.id AS event_id, e.title, r.account_id, e.registration_closes_at
     FROM events e JOIN registrations r ON r.event_id = e.id
     WHERE e.status = 'published' AND r.status IN ('registered', 'waitlisted')
-      AND e.registration_closes_at <= ?
-  `).all(nowIso) as Array<{ event_id: string; title: string; account_id: string }>;
+      AND e.registration_closes_at > ? AND e.registration_closes_at <= ?
+  `).all(nowIso, new Date(now.getTime() + 48 * 60 * 60_000).toISOString()) as Array<{ event_id: string; title: string; account_id: string; registration_closes_at: string }>;
+  const dueTodayRows = closingTodayRows.filter((row) => dayKey(new Date(row.registration_closes_at)) === today);
   const insertMarker = db.prepare(`
     INSERT OR IGNORE INTO notification_markers (event_id, account_id, kind, created_at)
     VALUES (?, ?, ?, ?)
   `);
-  const sendOnce = db.transaction((rows: typeof reminderRows, kind: string, message: (title: string) => string) => {
+  const sendOnce = db.transaction((rows: Array<{ event_id: string; title: string; account_id: string }>, kind: string, message: (title: string) => string) => {
     for (const row of rows) {
       const marker = insertMarker.run(row.event_id, row.account_id, kind, nowIso);
       if (marker.changes === 1) createNotification(row.account_id, row.event_id, kind, message(row.title));
     }
   });
-  sendOnce(reminderRows, 'event_reminder', (title) => `${title} starts within 24 hours.`);
-  sendOnce(closingRows, 'registration_close', (title) => `Registration for ${title} has closed.`);
+  sendOnce(reminderRows, 'event_reminder', (title) => `${title} is happening tomorrow.`);
+  sendOnce(dueTodayRows, 'registration_close', (title) => `Registration for ${title} closes today.`);
 }
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
