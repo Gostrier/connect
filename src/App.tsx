@@ -20,6 +20,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MapPin,
   MoreHorizontal,
   MessageSquareText,
   Plus,
@@ -59,6 +60,16 @@ type Screen =
   | 'analytics';
 
 type Recommendation = { event: CampusEvent; score: number; reasons: string[] };
+type AttendanceState = {
+  session: { status: 'not_open' | 'open' | 'closed'; openedAt: string | null; closedAt: string | null };
+  eventOngoing: boolean;
+  canManage: boolean;
+  canAttend: boolean;
+  checkedInAt: string | null;
+  radiusMeters: number;
+  attendees: AttendanceAttendee[];
+};
+type AttendanceAttendee = { displayName: string; email: string; faculty: string | null; course: string | null; checkedInAt: string };
 type RoomOption = {
   roomId: string;
   code: string;
@@ -199,7 +210,7 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
   onSuccess: (account: Account) => void;
 }) {
   const [mode, setMode] = useState(initialMode);
-  const [form, setForm] = useState({ displayName: '', email: '', password: '', invitationCode: '' });
+  const [form, setForm] = useState({ displayName: '', email: '', faculty: '', course: '', password: '', confirmPassword: '', invitationCode: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -238,9 +249,20 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
           <label>Email address
             <input required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="you@campusconnect.test" autoComplete="email" />
           </label>
+          {mode === 'signup' && <>
+            <label>Faculty
+              <input required maxLength={120} value={form.faculty} onChange={(event) => setForm({ ...form, faculty: event.target.value })} placeholder="e.g. School of Computing" autoComplete="organization-title" />
+            </label>
+            <label>Course
+              <input required maxLength={120} value={form.course} onChange={(event) => setForm({ ...form, course: event.target.value })} placeholder="e.g. Information Technology" autoComplete="organization" />
+            </label>
+          </>}
           <label>Password
             <input required minLength={mode === 'signup' ? 10 : 1} type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={mode === 'signup' ? 'At least 10 characters' : 'Enter your password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
           </label>
+          {mode === 'signup' && <label>Confirm password
+            <input required minLength={10} type="password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} placeholder="Enter your password again" autoComplete="new-password" />
+          </label>}
           {mode === 'signup' && (
             <details className="invite-field">
               <summary>Have an Organizer invitation?</summary>
@@ -513,6 +535,7 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
           {event.meetingUrl && <a className="meeting-link" href={event.meetingUrl} target="_blank" rel="noreferrer">Open event link <ArrowUpRight size={15} /></a>}
           <div className="organizer-card"><span className="avatar">{initials(event.organizerName)}</span><div><small>Organized by</small><strong>{event.organizerName}</strong></div><ShieldCheck size={18} /></div>
           <section className="details-about"><h2>About this event</h2><p>{event.description}</p><p className="muted">Registration closes {formatDate(event.registrationClosesAt, { weekday: 'long', hour: '2-digit', minute: '2-digit' })}.</p></section>
+          {account && event.deliveryMode !== 'online' && <AttendancePanel eventId={event.id} role={account.role} />}
         </main>
         <aside className="registration-card">
           <span className="eyebrow">SAVE YOUR SEAT</span><strong>{event.seatsAvailable > 0 ? `${event.seatsAvailable} spots left` : 'Join the waitlist'}</strong>
@@ -529,6 +552,106 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
         </aside>
       </div>
     </div>
+  );
+}
+
+function getCurrentLocation(): Promise<{ latitude: number; longitude: number; accuracy: number }> {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('This browser does not support location access.'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => resolve({ latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy }),
+      (error) => reject(new Error(error.code === error.PERMISSION_DENIED
+        ? 'Allow location access in your browser to continue.'
+        : error.code === error.TIMEOUT
+          ? 'Could not get your location in time. Try again.'
+          : 'Your location is unavailable. Check your device settings and try again.')),
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 20_000 },
+    );
+  });
+}
+
+function AttendancePanel({ eventId, role }: { eventId: string; role: Account['role'] }) {
+  const [attendance, setAttendance] = useState<AttendanceState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const refresh = useCallback(async () => {
+    const result = await api<AttendanceState>(`/events/${eventId}/attendance`);
+    setAttendance(result);
+  }, [eventId]);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const result = await api<AttendanceState>(`/events/${eventId}/attendance`);
+        if (mounted) setAttendance(result);
+      } catch (reason) {
+        if (mounted) setError(reason instanceof Error ? reason.message : 'Attendance status could not be loaded.');
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 15_000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, [eventId]);
+
+  const act = async (action: 'open' | 'close' | 'check-in') => {
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const location = action === 'close' ? undefined : await getCurrentLocation();
+      await api(`/events/${eventId}/attendance/${action}`, {
+        method: 'POST',
+        ...(location ? { body: JSON.stringify(location) } : {}),
+      });
+      setMessage(action === 'open' ? 'Attendance is open. Students can check in at this location.' : action === 'close' ? 'Attendance is closed.' : 'Your attendance has been marked.');
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Attendance could not be updated.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (role === 'organizer' && attendance && !attendance.canManage) return null;
+  return (
+    <section className="attendance-panel">
+      <div className="attendance-panel-heading"><span className="attendance-icon"><MapPin size={18} /></span><div><h2>Event attendance</h2><p>Location check-in within {attendance?.radiusMeters ?? 100} m</p></div></div>
+      {loading ? <p className="field-note">Loading attendance status…</p> : attendance && (
+        <>
+          {role === 'organizer' && <p className="attendance-description">Open attendance while you are at the event. The location at opening becomes the check-in point.</p>}
+          {role === 'student' && !attendance.canAttend && <p className="attendance-description">Check-in is available to students with a confirmed registration.</p>}
+          {attendance.checkedInAt
+            ? <div className="attendance-success"><CheckCircle2 size={17} /> Attendance marked at {formatTime(attendance.checkedInAt)}.</div>
+            : role === 'organizer'
+              ? attendance.session.status === 'open'
+                ? <div className="attendance-actions"><span className="attendance-live"><i /> Attendance is open</span><button className="button button-secondary button-small" disabled={busy} onClick={() => void act('close')}>{busy ? 'Closing…' : 'Close attendance'}</button></div>
+                : attendance.session.status === 'closed'
+                  ? <div className="attendance-success"><CheckCircle2 size={17} /> Attendance is closed.</div>
+                  : <button className="button button-primary button-small" disabled={busy || !attendance.eventOngoing} onClick={() => void act('open')}>{busy ? 'Getting location…' : attendance.eventOngoing ? 'Open attendance at this location' : 'Available during the event'}</button>
+              : attendance.session.status === 'open' && attendance.eventOngoing && attendance.canAttend
+                ? <button className="button button-primary button-small" disabled={busy} onClick={() => void act('check-in')}>{busy ? 'Checking location…' : 'Mark my attendance'}</button>
+                : <p className="field-note">{attendance.session.status === 'closed' ? 'The organizer has closed attendance.' : attendance.session.status === 'not_open' ? 'The organizer has not opened attendance yet.' : attendance.eventOngoing ? 'A confirmed registration is required to check in.' : 'Check-in is available while the event is ongoing.'}</p>}
+          {attendance.canManage && attendance.attendees.length > 0 && <div className="attendance-roster">
+            <h3>Checked-in students <span>{attendance.attendees.length}</span></h3>
+            {attendance.attendees.map((student) => <div className="attendance-student" key={student.email}>
+              <span className="attendance-student-avatar">{initials(student.displayName)}</span>
+              <div><b>{student.displayName}</b><small>{student.email}</small><small>{[student.course, student.faculty].filter(Boolean).join(' · ') || 'Student'}</small></div>
+              <time>{formatTime(student.checkedInAt)}</time>
+            </div>)}
+          </div>}
+        </>
+      )}
+      {message && <p className="attendance-feedback" role="status">{message}</p>}
+      {error && <p className="form-error" role="alert">{error}</p>}
+    </section>
   );
 }
 

@@ -176,8 +176,14 @@ function notifyEventRegistrants(eventId: string, kind: string, message: string):
 const signupSchema = z.object({
   email: z.string().email().max(120).refine((value) => value.toLowerCase().endsWith('.test'), 'Use a synthetic .test email for this presentation prototype.'),
   displayName: z.string().trim().min(2).max(80),
+  faculty: z.string().trim().min(1).max(120),
+  course: z.string().trim().min(1).max(120),
   password: z.string().min(10).max(128),
+  confirmPassword: z.string().min(10).max(128),
   invitationCode: z.string().trim().max(120).optional(),
+}).refine((value) => value.password === value.confirmPassword, {
+  path: ['confirmPassword'],
+  message: 'Passwords do not match.',
 });
 
 app.post('/api/auth/signup', (req, res) => {
@@ -186,7 +192,7 @@ app.post('/api/auth/signup', (req, res) => {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the sign-up details.' });
     return;
   }
-  const { email, displayName, password, invitationCode } = parsed.data;
+  const { email, displayName, faculty, course, password, invitationCode } = parsed.data;
   const normalizedEmail = email.toLowerCase();
   const role: AccountRole = invitationCode ? 'organizer' : 'student';
   const invitationHash = invitationCode ? createHash('sha256').update(invitationCode).digest('hex') : null;
@@ -207,9 +213,9 @@ app.post('/api/auth/signup', (req, res) => {
   const createdAt = new Date().toISOString();
   const createAccount = db.transaction(() => {
     db.prepare(`
-      INSERT INTO accounts (id, email, display_name, password_hash, role, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(accountId, normalizedEmail, displayName, bcrypt.hashSync(password, 10), role, createdAt);
+      INSERT INTO accounts (id, email, display_name, password_hash, role, faculty, course, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(accountId, normalizedEmail, displayName, bcrypt.hashSync(password, 10), role, faculty, course, createdAt);
     if (invitation) {
       const result = db.prepare(`
         UPDATE organizer_invitations SET used_at = ? WHERE id = ? AND used_at IS NULL
@@ -631,6 +637,182 @@ app.delete('/api/events/:id/register', requireAuth, requireRole('student'), (req
   });
   cancel();
   res.json({ ok: true });
+});
+
+const attendanceRadiusMeters = 100;
+const locationSchema = z.object({
+  latitude: z.number().finite().min(-90).max(90),
+  longitude: z.number().finite().min(-180).max(180),
+  accuracy: z.number().finite().positive().max(500),
+});
+
+function distanceMeters(fromLat: number, fromLon: number, toLat: number, toLon: number): number {
+  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const latDiff = radians(toLat - fromLat);
+  const lonDiff = radians(toLon - fromLon);
+  const a = Math.sin(latDiff / 2) ** 2
+    + Math.cos(radians(fromLat)) * Math.cos(radians(toLat)) * Math.sin(lonDiff / 2) ** 2;
+  return 6_371_000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+app.get('/api/events/:id/attendance', requireAuth, (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const event = db.prepare('SELECT id, status, delivery_mode, start_at, end_at, organizer_id FROM events WHERE id = ?')
+    .get(req.params.id) as { id: string; status: string; delivery_mode: string; start_at: string; end_at: string; organizer_id: string } | undefined;
+  if (!event || event.status === 'cancelled') {
+    res.status(404).json({ error: 'Event not found.' });
+    return;
+  }
+  const session = db.prepare('SELECT opened_at, closed_at FROM attendance_sessions WHERE event_id = ?')
+    .get(event.id) as { opened_at: string; closed_at: string | null } | undefined;
+  const registration = req.account.role === 'student'
+    ? db.prepare('SELECT status FROM registrations WHERE event_id = ? AND account_id = ?').get(event.id, req.account.id) as { status: string } | undefined
+    : undefined;
+  const record = req.account.role === 'student'
+    ? db.prepare('SELECT checked_in_at FROM attendance_records WHERE event_id = ? AND account_id = ?').get(event.id, req.account.id) as { checked_in_at: string } | undefined
+    : undefined;
+  const canManage = req.account.role === 'organizer' && event.organizer_id === req.account.id;
+  const attendees = canManage ? db.prepare(`
+    SELECT display_name_snapshot AS displayName, email_snapshot AS email,
+      faculty_snapshot AS faculty, course_snapshot AS course, checked_in_at AS checkedInAt
+    FROM attendance_records WHERE event_id = ? ORDER BY checked_in_at ASC
+  `).all(event.id) : [];
+  const now = Date.now();
+  const ongoing = event.status === 'published' && now >= Date.parse(event.start_at) && now < Date.parse(event.end_at);
+  res.json({
+    session: session ? { status: session.closed_at ? 'closed' : 'open', openedAt: session.opened_at, closedAt: session.closed_at } : { status: 'not_open', openedAt: null, closedAt: null },
+    eventOngoing: ongoing,
+    canManage,
+    canAttend: req.account.role === 'student' && registration?.status === 'registered',
+    checkedInAt: record?.checked_in_at ?? null,
+    attendees,
+    radiusMeters: attendanceRadiusMeters,
+  });
+});
+
+app.post('/api/events/:id/attendance/open', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const parsed = locationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Share a valid current location to open attendance.' });
+    return;
+  }
+  const event = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
+  if (!event || event.status !== 'published') {
+    res.status(404).json({ error: 'Published event not found.' });
+    return;
+  }
+  if (String(event.organizer_id) !== req.account.id) {
+    res.status(403).json({ error: 'Only this event’s organizer can manage attendance.' });
+    return;
+  }
+  if (event.delivery_mode === 'online') {
+    res.status(409).json({ error: 'Location-based attendance is available for in-person or hybrid events.' });
+    return;
+  }
+  const now = Date.now();
+  if (now < Date.parse(String(event.start_at)) || now >= Date.parse(String(event.end_at))) {
+    res.status(409).json({ error: 'Attendance can only be opened while the event is ongoing.' });
+    return;
+  }
+  if (parsed.data.accuracy > attendanceRadiusMeters) {
+    res.status(400).json({ error: 'Your location is not precise enough. Try again outdoors or enable precise location.' });
+    return;
+  }
+  try {
+    db.prepare('INSERT INTO attendance_sessions (event_id, latitude, longitude, opened_at) VALUES (?, ?, ?, ?)')
+      .run(req.params.id, parsed.data.latitude, parsed.data.longitude, new Date().toISOString());
+  } catch {
+    res.status(409).json({ error: 'Attendance has already been opened or closed for this event.' });
+    return;
+  }
+  res.status(201).json({ ok: true });
+});
+
+app.post('/api/events/:id/attendance/close', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const event = db.prepare('SELECT organizer_id FROM events WHERE id = ?').get(req.params.id) as { organizer_id: string } | undefined;
+  if (!event) {
+    res.status(404).json({ error: 'Event not found.' });
+    return;
+  }
+  if (event.organizer_id !== req.account.id) {
+    res.status(403).json({ error: 'Only this event’s organizer can manage attendance.' });
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const close = db.transaction(() => {
+    const updated = db.prepare('UPDATE attendance_sessions SET closed_at = ? WHERE event_id = ? AND closed_at IS NULL')
+      .run(nowIso, req.params.id);
+    if (updated.changes !== 1) return false;
+    const registered = db.prepare("SELECT COUNT(*) AS count FROM registrations WHERE event_id = ? AND status = 'registered'")
+      .get(req.params.id) as { count: number };
+    const checkedIn = db.prepare('SELECT COUNT(*) AS count FROM attendance_records WHERE event_id = ?')
+      .get(req.params.id) as { count: number };
+    db.prepare('INSERT INTO attendance_history (id, event_id, registration_count, check_in_count) VALUES (?, ?, ?, ?)')
+      .run(randomUUID(), req.params.id, registered.count, checkedIn.count);
+    return true;
+  });
+  if (!close()) {
+    res.status(409).json({ error: 'Attendance is not open.' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/events/:id/attendance/check-in', requireAuth, requireRole('student'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const parsed = locationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Share a valid current location to check in.' });
+    return;
+  }
+  const event = db.prepare('SELECT status, start_at, end_at FROM events WHERE id = ?').get(req.params.id) as { status: string; start_at: string; end_at: string } | undefined;
+  if (!event || event.status !== 'published') {
+    res.status(404).json({ error: 'Published event not found.' });
+    return;
+  }
+  const now = Date.now();
+  if (now < Date.parse(event.start_at) || now >= Date.parse(event.end_at)) {
+    res.status(409).json({ error: 'Attendance can only be marked while the event is ongoing.' });
+    return;
+  }
+  const registration = db.prepare("SELECT status FROM registrations WHERE event_id = ? AND account_id = ?")
+    .get(req.params.id, req.account.id) as { status: string } | undefined;
+  if (registration?.status !== 'registered') {
+    res.status(403).json({ error: 'Only students with a confirmed registration can check in.' });
+    return;
+  }
+  const session = db.prepare('SELECT latitude, longitude, closed_at FROM attendance_sessions WHERE event_id = ?')
+    .get(req.params.id) as { latitude: number; longitude: number; closed_at: string | null } | undefined;
+  if (!session || session.closed_at) {
+    res.status(409).json({ error: 'The organizer has not opened attendance or has closed it.' });
+    return;
+  }
+  if (parsed.data.accuracy > 150) {
+    res.status(400).json({ error: 'Your location is not precise enough. Enable precise location and try again.' });
+    return;
+  }
+  const distance = distanceMeters(session.latitude, session.longitude, parsed.data.latitude, parsed.data.longitude);
+  if (distance > attendanceRadiusMeters) {
+    res.status(403).json({ error: `You must be within ${attendanceRadiusMeters} metres of the event location to check in.` });
+    return;
+  }
+  try {
+    db.prepare(`
+      INSERT INTO attendance_records
+        (id, event_id, account_id, display_name_snapshot, email_snapshot, faculty_snapshot, course_snapshot, checked_in_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(), req.params.id, req.account.id,
+      req.account.displayName, req.account.email, req.account.faculty, req.account.course,
+      new Date().toISOString(),
+    );
+  } catch {
+    res.status(409).json({ error: 'You have already checked in to this event.' });
+    return;
+  }
+  res.status(201).json({ ok: true });
 });
 
 app.get('/api/rooms', (_req, res) => {

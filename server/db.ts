@@ -101,6 +101,26 @@ db.exec(`
     check_in_count INTEGER NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS attendance_sessions (
+    event_id TEXT PRIMARY KEY REFERENCES events(id),
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS attendance_records (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(id),
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    display_name_snapshot TEXT NOT NULL DEFAULT '',
+    email_snapshot TEXT NOT NULL DEFAULT '',
+    faculty_snapshot TEXT,
+    course_snapshot TEXT,
+    checked_in_at TEXT NOT NULL,
+    UNIQUE (event_id, account_id)
+  );
+
   CREATE TABLE IF NOT EXISTS organizer_invitations (
     id TEXT PRIMARY KEY,
     code_hash TEXT NOT NULL UNIQUE,
@@ -119,6 +139,28 @@ const accountColumns = db.pragma('table_info(accounts)') as Array<{ name: string
 if (!accountColumns.some((column) => column.name === 'in_app_preferences')) {
   db.exec("ALTER TABLE accounts ADD COLUMN in_app_preferences TEXT NOT NULL DEFAULT '{}'");
 }
+
+const attendanceRecordColumns = db.pragma('table_info(attendance_records)') as Array<{ name: string }>;
+if (!attendanceRecordColumns.some((column) => column.name === 'display_name_snapshot')) {
+  db.exec("ALTER TABLE attendance_records ADD COLUMN display_name_snapshot TEXT NOT NULL DEFAULT ''");
+}
+if (!attendanceRecordColumns.some((column) => column.name === 'email_snapshot')) {
+  db.exec("ALTER TABLE attendance_records ADD COLUMN email_snapshot TEXT NOT NULL DEFAULT ''");
+}
+if (!attendanceRecordColumns.some((column) => column.name === 'faculty_snapshot')) {
+  db.exec('ALTER TABLE attendance_records ADD COLUMN faculty_snapshot TEXT');
+}
+if (!attendanceRecordColumns.some((column) => column.name === 'course_snapshot')) {
+  db.exec('ALTER TABLE attendance_records ADD COLUMN course_snapshot TEXT');
+}
+db.exec(`
+  UPDATE attendance_records
+  SET display_name_snapshot = COALESCE((SELECT display_name FROM accounts WHERE accounts.id = attendance_records.account_id), ''),
+      email_snapshot = COALESCE((SELECT email FROM accounts WHERE accounts.id = attendance_records.account_id), ''),
+      faculty_snapshot = (SELECT faculty FROM accounts WHERE accounts.id = attendance_records.account_id),
+      course_snapshot = (SELECT course FROM accounts WHERE accounts.id = attendance_records.account_id)
+  WHERE display_name_snapshot = '' OR email_snapshot = ''
+`);
 
 const now = new Date();
 const insertAccount = db.prepare(`
