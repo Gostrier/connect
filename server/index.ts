@@ -133,6 +133,7 @@ function mapEvent(row: Record<string, unknown>, accountId?: string): EventRecord
     requiredFacilities: parseJson<string[]>(String(row.required_facilities)),
     roomId: row.room_id ? String(row.room_id) : null,
     roomName: row.room_name ? String(row.room_name) : null,
+    venueLabel: row.venue_label ? String(row.venue_label) : null,
     meetingUrl: row.meeting_url ? String(row.meeting_url) : null,
     status: row.status as EventRecord['status'],
     organizerName: String(row.organizer_name ?? ''),

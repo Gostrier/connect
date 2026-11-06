@@ -55,6 +55,7 @@ db.exec(`
     registration_capacity_custom INTEGER NOT NULL DEFAULT 0,
     required_facilities TEXT NOT NULL DEFAULT '[]',
     room_id TEXT REFERENCES rooms(id),
+    venue_label TEXT,
     meeting_url TEXT,
     status TEXT NOT NULL CHECK (status IN ('draft', 'published', 'cancelled')),
     organizer_id TEXT NOT NULL REFERENCES accounts(id),
@@ -114,6 +115,9 @@ const eventColumns = db.pragma('table_info(events)') as Array<{ name: string }>;
 if (!eventColumns.some((column) => column.name === 'registration_capacity_custom')) {
   db.exec('ALTER TABLE events ADD COLUMN registration_capacity_custom INTEGER NOT NULL DEFAULT 0');
 }
+if (!eventColumns.some((column) => column.name === 'venue_label')) {
+  db.exec('ALTER TABLE events ADD COLUMN venue_label TEXT');
+}
 
 const accountColumns = db.pragma('table_info(accounts)') as Array<{ name: string }>;
 if (!accountColumns.some((column) => column.name === 'in_app_preferences')) {
@@ -154,8 +158,8 @@ const insertEvent = db.prepare(`
   INSERT OR IGNORE INTO events
     (id, title, description, category, delivery_mode, faculty, club_name, start_at, end_at,
      registration_closes_at, expected_attendance, registration_capacity, required_facilities,
-     room_id, meeting_url, status, organizer_id, is_demo, created_at, updated_at)
-  VALUES (?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, '[]', NULL, ?, 'published', ?, 1, ?, ?)
+     room_id, venue_label, meeting_url, status, organizer_id, is_demo, created_at, updated_at)
+  VALUES (?, ?, ?, ?, 'in_person', ?, ?, ?, ?, ?, ?, ?, '[]', NULL, ?, NULL, 'published', ?, 1, ?, ?)
 `);
 
 const sampleEvents = [
@@ -171,7 +175,7 @@ const sampleEvents = [
     duration: 90,
     expected: 80,
     capacity: 100,
-    meeting: 'https://meet.example.test/ai-workshop',
+    venue: 'Tuition Complex Room 20',
   },
   {
     id: 'demo-career-clinic',
@@ -185,7 +189,7 @@ const sampleEvents = [
     duration: 60,
     expected: 45,
     capacity: 60,
-    meeting: 'https://meet.example.test/cv-clinic',
+    venue: 'Pavilion Grounds',
   },
   {
     id: 'demo-community-health',
@@ -199,7 +203,7 @@ const sampleEvents = [
     duration: 75,
     expected: 55,
     capacity: 70,
-    meeting: 'https://meet.example.test/health-exchange',
+    venue: 'Amphitheatre',
   },
   {
     id: 'demo-culture-night',
@@ -213,7 +217,7 @@ const sampleEvents = [
     duration: 120,
     expected: 120,
     capacity: 150,
-    meeting: 'https://meet.example.test/culture-night',
+    venue: 'Tuition Complex Room 20',
   },
   {
     id: 'demo-wellness-break',
@@ -227,7 +231,7 @@ const sampleEvents = [
     duration: 45,
     expected: 40,
     capacity: 60,
-    meeting: 'https://meet.example.test/evening-reset',
+    venue: 'Pavilion Grounds',
   },
   {
     id: 'demo-board-game-social',
@@ -241,7 +245,7 @@ const sampleEvents = [
     duration: 90,
     expected: 90,
     capacity: 120,
-    meeting: 'https://meet.example.test/board-games',
+    venue: 'Amphitheatre',
   },
   {
     id: 'demo-portfolio-sprint',
@@ -255,7 +259,7 @@ const sampleEvents = [
     duration: 90,
     expected: 55,
     capacity: 80,
-    meeting: 'https://meet.example.test/portfolio-sprint',
+    venue: 'Tuition Complex Room 20',
   },
 ];
 
@@ -277,11 +281,15 @@ for (const event of sampleEvents) {
     closes.toISOString(),
     event.expected,
     event.capacity,
-    event.meeting,
+    event.venue,
     organizer.id,
     now.toISOString(),
     now.toISOString(),
   );
+  db.prepare(`
+    UPDATE events SET delivery_mode = 'in_person', venue_label = ?, meeting_url = NULL
+    WHERE id = ? AND is_demo = 1
+  `).run(event.venue, event.id);
 }
 
 const accountIdForEmail = (email: string): string => {

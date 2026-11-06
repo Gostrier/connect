@@ -163,7 +163,7 @@ function EventCard({ event, onOpen, onRegister, onSave, saved }: {
         <button className="event-title-button" onClick={onOpen}>{event.title}</button>
         <div className="event-card-detail"><CalendarDays size={15} />{formatDate(event.startAt)}</div>
         <div className="event-card-detail"><Clock3 size={15} />{formatTime(event.startAt)} · {modeLabels[event.deliveryMode]}</div>
-        <div className="event-card-detail"><DoorOpen size={15} />{event.roomName ?? (event.deliveryMode === 'online' ? 'Online event' : 'Venue to be confirmed')}</div>
+        <div className="event-card-detail"><DoorOpen size={15} />{event.roomName ?? event.venueLabel ?? (event.deliveryMode === 'online' ? 'Online event' : 'Venue to be confirmed')}</div>
         <div className="event-card-footer">
           <span className="seat-copy">{event.seatsAvailable > 0 ? `${event.seatsAvailable} seats left` : 'Waitlist open'}</span>
           <div className="card-actions">
@@ -228,7 +228,11 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
         <div className="brand-mark brand-mark-small"><GraduationCap size={22} /></div>
         <p className="eyebrow">{mode === 'login' ? 'WELCOME BACK' : 'JOIN THE COMMUNITY'}</p>
         <h2 id="auth-title">{mode === 'login' ? 'Sign in to CampusConnect' : 'Create a student account'}</h2>
-        <p className="muted">Presentation prototype only. Use a fictional <code>.test</code> email, never a real student identity.</p>
+        <p className="muted">
+          {mode === 'signup'
+            ? <>Create separate accounts with a different, unique fictional <code>.test</code> email and password for each one. Never use a real student identity.</>
+            : <>Presentation prototype only. Sign in with the fictional <code>.test</code> email and password for your account.</>}
+        </p>
         <form className="stack-form" onSubmit={submit}>
           {mode === 'signup' && (
             <label>Full name
@@ -259,7 +263,7 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
             {mode === 'login' ? 'Create account' : 'Sign in'}
           </button>
         </p>
-        {mode === 'login' && <p className="field-note">Demo: student@campusconnect.test or organizer@campusconnect.test · CampusDemo!2026</p>}
+        {mode === 'login' && <p className="field-note">Demo: student@campusconnect.test or organizer@campusconnect.test · CampusDemo!2026. You can also sign in to any account you created.</p>}
       </section>
     </div>
   );
@@ -507,7 +511,7 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
           <div className="details-facts">
             <div><CalendarDays size={19} /><span><b>{formatDate(event.startAt, { weekday: 'long', year: 'numeric' })}</b><small>Event date</small></span></div>
             <div><Clock3 size={19} /><span><b>{formatTime(event.startAt)} – {formatTime(event.endAt)}</b><small>East Africa Time</small></span></div>
-            <div><DoorOpen size={19} /><span><b>{event.roomName ?? (event.deliveryMode === 'online' ? 'Online event' : 'Venue to be confirmed')}</b><small>{modeLabels[event.deliveryMode]} · {event.faculty}</small></span></div>
+            <div><DoorOpen size={19} /><span><b>{event.roomName ?? event.venueLabel ?? (event.deliveryMode === 'online' ? 'Online event' : 'Venue to be confirmed')}</b><small>{modeLabels[event.deliveryMode]} · {event.faculty}</small></span></div>
             <div><Users size={19} /><span><b>{event.seatsAvailable > 0 ? `${event.seatsAvailable} seats available` : 'Waitlist open'}</b><small>{event.registeredCount} registered of {event.registrationCapacity}</small></span></div>
           </div>
           {event.meetingUrl && <a className="meeting-link" href={event.meetingUrl} target="_blank" rel="noreferrer">Open event link <ArrowUpRight size={15} /></a>}

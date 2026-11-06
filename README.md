@@ -20,7 +20,7 @@ Demo sign-in:
 | Student | `student@campusconnect.test` | `CampusDemo!2026` |
 | Organizer | `organizer@campusconnect.test` | `CampusDemo!2026` |
 
-New accounts must use fictional email addresses ending in `.test`. The local one-time Organizer invitation is `local-organizer-invite`. Set `ORGANIZER_INVITE_CODE` before starting the API to use a different local invitation.
+You can create multiple separate accounts from the Register form. Each needs its own unique fictional email address ending in `.test` and password; signing up signs that account in, and it can be used again from Sign in. Never use a real student identity or email. The local one-time Organizer invitation is `local-organizer-invite`. Set `ORGANIZER_INVITE_CODE` before starting the API to use a different local invitation.
 
 ## Checks
 
@@ -33,8 +33,8 @@ npm run lint
 
 ## Data and integrations
 
-- Events, registrations, and room bookings are stored locally in SQLite. Included sample events and account data are fictional.
-- `data/rooms.json` is intentionally empty. Room allocation remains unconfigured until an administrator enters verified room details. Do not enter unverified venue facts.
+- Events, registrations, and room bookings are stored locally in SQLite. Included sample events and account data are fictional; sample events show in-person venue labels for Tuition Complex Room 20, Pavilion Grounds, and Amphitheatre.
+- `data/rooms.json` is intentionally empty. The sample venue labels are for presentation only; room allocation remains unconfigured until an administrator enters verified room details and booking data.
 - In-app notifications are stored locally. Web Push and SMS are not configured, and no external messages are sent.
 - Dates are presented in the `Africa/Nairobi` time zone.
 - Signup, Organizer invitations, and local authentication are for this presentation prototype only. Do not use real student identities, passwords, production data, or deploy this as a university service.

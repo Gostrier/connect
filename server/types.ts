@@ -29,6 +29,7 @@ export interface EventRecord {
   requiredFacilities: string[];
   roomId: string | null;
   roomName: string | null;
+  venueLabel: string | null;
   meetingUrl: string | null;
   status: 'draft' | 'published' | 'cancelled';
   organizerName: string;

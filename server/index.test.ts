@@ -31,6 +31,27 @@ describe('CampusConnect API', () => {
     ]));
   });
 
+  it('shows sample events as in-person at the configured presentation venues', async () => {
+    const response = await request(app).get('/api/events').expect(200);
+    const events = response.body.events as Array<{
+      id: string;
+      deliveryMode: string;
+      venueLabel: string | null;
+      meetingUrl: string | null;
+    }>;
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'demo-ai-workshop', deliveryMode: 'in_person', venueLabel: 'Tuition Complex Room 20', meetingUrl: null }),
+      expect.objectContaining({ id: 'demo-career-clinic', deliveryMode: 'in_person', venueLabel: 'Pavilion Grounds', meetingUrl: null }),
+      expect.objectContaining({ id: 'demo-community-health', deliveryMode: 'in_person', venueLabel: 'Amphitheatre', meetingUrl: null }),
+    ]));
+    expect(events.filter((event) => event.id.startsWith('demo-'))).toHaveLength(7);
+    expect(events.filter((event) => event.id.startsWith('demo-')).every((event) =>
+      event.deliveryMode === 'in_person'
+      && ['Tuition Complex Room 20', 'Pavilion Grounds', 'Amphitheatre'].includes(event.venueLabel ?? ''),
+    )).toBe(true);
+  });
+
   it('allows only synthetic test addresses to sign up', async () => {
     const rejected = await request(app).post('/api/auth/signup').send({
       displayName: 'Demo Student',
@@ -47,6 +68,40 @@ describe('CampusConnect API', () => {
     expect(accepted.status).toBe(201);
     expect(accepted.body.account.role).toBe('student');
     expect(accepted.headers['set-cookie'][0]).toContain('HttpOnly');
+  });
+
+  it('keeps multiple sign-up accounts separate and lets each sign in again', async () => {
+    const firstAccount = request.agent(app);
+    const secondAccount = request.agent(app);
+    const firstCredentials = {
+      email: 'first-account@campusconnect.test',
+      password: 'First-account-password',
+    };
+    const secondCredentials = {
+      email: 'second-account@campusconnect.test',
+      password: 'Second-account-password',
+    };
+
+    await firstAccount.post('/api/auth/signup').send({
+      displayName: 'First Account',
+      ...firstCredentials,
+    }).expect(201);
+    await secondAccount.post('/api/auth/signup').send({
+      displayName: 'Second Account',
+      ...secondCredentials,
+    }).expect(201);
+
+    expect((await firstAccount.get('/api/auth/me').expect(200)).body.account.email).toBe(firstCredentials.email);
+    expect((await secondAccount.get('/api/auth/me').expect(200)).body.account.email).toBe(secondCredentials.email);
+
+    await firstAccount.post('/api/auth/logout').expect(204);
+    await firstAccount.post('/api/auth/login').send({
+      ...firstCredentials,
+      password: secondCredentials.password,
+    }).expect(401);
+    await firstAccount.post('/api/auth/login').send(firstCredentials).expect(200);
+    await secondAccount.post('/api/auth/logout').expect(204);
+    await secondAccount.post('/api/auth/login').send(secondCredentials).expect(200);
   });
 
   it('automatically promotes the oldest waitlisted student after a cancellation', async () => {
