@@ -3,7 +3,7 @@ import cors from 'cors';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { db, loadVerifiedRoomInventory } from './db.js';
 import type { Account, AccountRole, EventRecord } from './types.js';
@@ -25,6 +25,9 @@ type AccountRow = {
   email: string;
   display_name: string;
   role: AccountRole;
+  organizer_enabled: number;
+  admin_enabled: number;
+  is_active: number;
   faculty: string | null;
   course: string | null;
   interests: string;
@@ -43,6 +46,9 @@ function mapAccount(row: AccountRow): Account {
     email: row.email,
     displayName: row.display_name,
     role: row.role,
+    organizerEnabled: row.organizer_enabled === 1 || row.role === 'organizer',
+    adminEnabled: row.admin_enabled === 1,
+    isActive: row.is_active === 1,
     faculty: row.faculty,
     course: row.course,
     interests: JSON.parse(row.interests) as string[],
@@ -80,7 +86,7 @@ function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunctio
       return;
     }
     const account = accountById(payload.sub);
-    if (!account) {
+    if (!account || !account.isActive) {
       res.status(401).json({ error: 'Your account is unavailable. Sign in again.' });
       return;
     }
@@ -91,9 +97,12 @@ function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunctio
   }
 }
 
-function requireRole(...roles: AccountRole[]) {
+function requireRole(...roles: Array<AccountRole | 'administrator'>) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
-    if (!req.account || !roles.includes(req.account.role)) {
+    const allowed = req.account && (roles.includes(req.account.role)
+      || (roles.includes('organizer') && req.account.organizerEnabled)
+      || (roles.includes('administrator') && req.account.adminEnabled));
+    if (!allowed) {
       res.status(403).json({ error: 'This action is not available for your account role.' });
       return;
     }
@@ -155,7 +164,7 @@ const eventSelect = `
   JOIN accounts a ON a.id = e.organizer_id
 `;
 
-function createNotification(accountId: string, eventId: string, kind: string, message: string): void {
+function createNotification(accountId: string, eventId: string | null, kind: string, message: string): void {
   const account = db.prepare('SELECT in_app_preferences FROM accounts WHERE id = ?').get(accountId) as { in_app_preferences: string } | undefined;
   const preferences = account ? parseJson<Record<string, boolean>>(account.in_app_preferences) : {};
   if (preferences[kind] === false) return;
@@ -177,9 +186,16 @@ function notifyEventRegistrants(eventId: string, kind: string, message: string):
 const signupSchema = z.object({
   email: z.string().email().max(120).refine((value) => value.toLowerCase().endsWith('.test'), 'Use a synthetic .test email for this presentation prototype.'),
   displayName: z.string().trim().min(2).max(80),
+  faculty: z.string().trim().min(1).max(120),
+  course: z.string().trim().min(1).max(120),
   password: z.string().min(10).max(128),
-  invitationCode: z.string().trim().max(120).optional(),
+  confirmPassword: z.string().min(10).max(128),
+}).refine((value) => value.password === value.confirmPassword, {
+  path: ['confirmPassword'],
+  message: 'Passwords do not match.',
 });
+
+const configuredAdminEmails = (process.env.ADMIN_EMAILS ?? '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean);
 
 app.post('/api/auth/signup', (req, res) => {
   const parsed = signupSchema.safeParse(req.body);
@@ -187,18 +203,8 @@ app.post('/api/auth/signup', (req, res) => {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the sign-up details.' });
     return;
   }
-  const { email, displayName, password, invitationCode } = parsed.data;
+  const { email, displayName, faculty, course, password } = parsed.data;
   const normalizedEmail = email.toLowerCase();
-  const role: AccountRole = invitationCode ? 'organizer' : 'student';
-  const invitationHash = invitationCode ? createHash('sha256').update(invitationCode).digest('hex') : null;
-  const invitation = invitationHash
-    ? db.prepare('SELECT id, used_at, expires_at FROM organizer_invitations WHERE code_hash = ?').get(invitationHash) as { id: string; used_at: string | null; expires_at: string | null } | undefined
-    : undefined;
-
-  if (invitationCode && (!invitation || invitation.used_at || (invitation.expires_at && Date.parse(invitation.expires_at) < Date.now()))) {
-    res.status(400).json({ error: 'That Organizer invitation is invalid, expired, or already used.' });
-    return;
-  }
   if (db.prepare('SELECT 1 FROM accounts WHERE email = ?').get(normalizedEmail)) {
     res.status(409).json({ error: 'An account already uses that email.' });
     return;
@@ -206,17 +212,12 @@ app.post('/api/auth/signup', (req, res) => {
 
   const accountId = randomUUID();
   const createdAt = new Date().toISOString();
+  const adminEnabled = configuredAdminEmails.includes(normalizedEmail) ? 1 : 0;
   const createAccount = db.transaction(() => {
     db.prepare(`
-      INSERT INTO accounts (id, email, display_name, password_hash, role, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(accountId, normalizedEmail, displayName, bcrypt.hashSync(password, 10), role, createdAt);
-    if (invitation) {
-      const result = db.prepare(`
-        UPDATE organizer_invitations SET used_at = ? WHERE id = ? AND used_at IS NULL
-      `).run(createdAt, invitation.id);
-      if (result.changes !== 1) throw new Error('Organizer invitation was already redeemed.');
-    }
+      INSERT INTO accounts (id, email, display_name, password_hash, role, faculty, course, admin_enabled, created_at)
+      VALUES (?, ?, ?, ?, 'student', ?, ?, ?, ?)
+    `).run(accountId, normalizedEmail, displayName, bcrypt.hashSync(password, 10), faculty, course, adminEnabled, createdAt);
   });
   try {
     createAccount();
@@ -257,37 +258,137 @@ app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res) => {
   res.json({ account: req.account });
 });
 
-app.post('/api/auth/redeem-invitation', requireAuth, (req: AuthenticatedRequest, res) => {
-  const parsed = z.object({ code: z.string().trim().min(1).max(120) }).safeParse(req.body);
-  if (!parsed.success || !req.account) {
-    res.status(400).json({ error: 'Enter a valid invitation code.' });
+function normalizeClubName(name: string): string {
+  return name.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function activeClubOrganizerIds(clubKey: string): Set<string> {
+  const ids = new Set((db.prepare(`
+    SELECT applicant_id FROM organizer_applications
+    WHERE club_key = ? AND status IN ('pending', 'approved')
+  `).all(clubKey) as Array<{ applicant_id: string }>).map(({ applicant_id }) => applicant_id));
+  const organizers = db.prepare("SELECT id, clubs FROM accounts WHERE role = 'organizer' OR organizer_enabled = 1")
+    .all() as Array<{ id: string; clubs: string }>;
+  for (const organizer of organizers) {
+    const clubs = parseJson<string[]>(organizer.clubs);
+    if (clubs.some((club) => normalizeClubName(club) === clubKey)) ids.add(organizer.id);
+  }
+  return ids;
+}
+
+app.get('/api/organizer-applications/mine', requireAuth, (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const applications = db.prepare(`
+    SELECT id, club_name AS clubName, position, reason, status, created_at AS createdAt,
+      reviewed_at AS reviewedAt, review_note AS reviewNote
+    FROM organizer_applications WHERE applicant_id = ? ORDER BY created_at DESC
+  `).all(req.account.id);
+  res.json({ applications });
+});
+
+app.post('/api/organizer-applications', requireAuth, requireRole('student'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  if (req.account.organizerEnabled || req.account.adminEnabled) {
+    res.status(409).json({ error: 'Your account already has Organizer access.' });
     return;
   }
-  const hash = createHash('sha256').update(parsed.data.code).digest('hex');
-  const invitation = db.prepare('SELECT id, used_at, expires_at FROM organizer_invitations WHERE code_hash = ?').get(hash) as { id: string; used_at: string | null; expires_at: string | null } | undefined;
-  if (!invitation || invitation.used_at || (invitation.expires_at && Date.parse(invitation.expires_at) < Date.now())) {
-    res.status(400).json({ error: 'That Organizer invitation is invalid, expired, or already used.' });
+  const parsed = z.object({
+    clubName: z.string().trim().min(2).max(120),
+    position: z.string().trim().min(2).max(100),
+    reason: z.string().trim().min(20).max(1500),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the application details.' });
     return;
   }
-  const redeem = db.transaction(() => {
-    const result = db.prepare('UPDATE organizer_invitations SET used_at = ? WHERE id = ? AND used_at IS NULL')
-      .run(new Date().toISOString(), invitation.id);
-    if (result.changes !== 1) throw new Error('Invitation was already used.');
-    db.prepare('UPDATE accounts SET role = ? WHERE id = ?').run('organizer', req.account?.id);
-  });
-  try {
-    redeem();
-  } catch {
-    res.status(409).json({ error: 'That Organizer invitation was already redeemed.' });
+  const clubName = parsed.data.clubName.replace(/\s+/g, ' ');
+  const clubKey = normalizeClubName(clubName);
+  const create = db.transaction(() => {
+    const previous = db.prepare(`
+      SELECT id FROM organizer_applications WHERE applicant_id = ? AND club_key = ?
+        AND status IN ('pending', 'approved') LIMIT 1
+    `).get(req.account?.id, clubKey);
+    if (previous) return { error: 'You already have an active application for this club.' };
+    const organizerIds = activeClubOrganizerIds(clubKey);
+    if (organizerIds.size >= 3) return { error: 'This club already has three active Organizer applications or organizers.' };
+    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO organizer_applications (id, applicant_id, club_name, club_key, position, reason, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).run(id, req.account?.id, clubName, clubKey, parsed.data.position, parsed.data.reason, createdAt);
+    return { id };
+  }).immediate();
+  if ('error' in create) {
+    res.status(409).json({ error: create.error });
     return;
   }
-  const account = accountById(req.account.id);
-  if (!account) {
-    res.status(500).json({ error: 'The account could not be reloaded.' });
+  res.status(201).json({ ok: true, id: create.id });
+});
+
+app.post('/api/organizer-applications/:id/withdraw', requireAuth, (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const result = db.prepare(`
+    UPDATE organizer_applications SET status = 'withdrawn'
+    WHERE id = ? AND applicant_id = ? AND status = 'pending'
+  `).run(req.params.id, req.account.id);
+  if (result.changes !== 1) {
+    res.status(409).json({ error: 'Only a pending application can be withdrawn.' });
     return;
   }
-  issueSession(res, account);
-  res.json({ account });
+  res.json({ ok: true });
+});
+
+app.get('/api/organizer-applications/review', requireAuth, requireRole('administrator'), (_req, res) => {
+  const applications = db.prepare(`
+    SELECT app.id, app.club_name AS clubName, app.position, app.reason, app.created_at AS createdAt,
+      account.display_name AS applicantName, account.email AS applicantEmail,
+      account.faculty, account.course
+    FROM organizer_applications app JOIN accounts account ON account.id = app.applicant_id
+    WHERE app.status = 'pending' ORDER BY app.created_at ASC
+  `).all();
+  res.json({ applications });
+});
+
+app.post('/api/organizer-applications/:id/review', requireAuth, requireRole('administrator'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const parsed = z.object({
+    decision: z.enum(['approve', 'reject']),
+    note: z.string().trim().max(500).optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Choose approve or reject and provide a valid note.' });
+    return;
+  }
+  const review = db.transaction(() => {
+    const application = db.prepare(`
+      SELECT id, applicant_id, club_name, club_key, status FROM organizer_applications WHERE id = ?
+    `).get(req.params.id) as { id: string; applicant_id: string; club_name: string; club_key: string; status: string } | undefined;
+    if (!application || application.status !== 'pending') return { error: 'This application is no longer pending.' };
+    if (application.applicant_id === req.account?.id) return { error: 'You cannot review your own application.' };
+    if (parsed.data.decision === 'approve') {
+      const count = activeClubOrganizerIds(application.club_key).size;
+      if (count > 3) return { error: 'This club is already at the three-Organizer limit.' };
+      const account = db.prepare('SELECT clubs FROM accounts WHERE id = ?').get(application.applicant_id) as { clubs: string };
+      const clubs = parseJson<string[]>(account.clubs);
+      if (!clubs.some((club) => normalizeClubName(club) === application.club_key)) clubs.push(application.club_name);
+      db.prepare('UPDATE accounts SET organizer_enabled = 1, clubs = ? WHERE id = ?')
+        .run(JSON.stringify(clubs), application.applicant_id);
+    }
+    db.prepare(`
+      UPDATE organizer_applications SET status = ?, reviewed_at = ?, reviewer_id = ?, review_note = ?
+      WHERE id = ? AND status = 'pending'
+    `).run(parsed.data.decision === 'approve' ? 'approved' : 'rejected', new Date().toISOString(), req.account?.id, parsed.data.note ?? null, application.id);
+    return { ok: true, applicantId: application.applicant_id, clubName: application.club_name, decision: parsed.data.decision };
+  }).immediate();
+  if ('error' in review) {
+    res.status(409).json({ error: review.error });
+    return;
+  }
+  const applicant = accountById(review.applicantId);
+  if (applicant) createNotification(applicant.id, null, 'organizer_application',
+    `Your Organizer application for ${review.clubName} was ${review.decision === 'approve' ? 'approved' : 'declined'}.`);
+  res.json({ ok: true });
 });
 
 app.get('/api/events', (req: AuthenticatedRequest, res) => {
@@ -307,7 +408,8 @@ app.get('/api/events', (req: AuthenticatedRequest, res) => {
   const mode = typeof req.query.mode === 'string' ? req.query.mode : '';
   const from = typeof req.query.from === 'string' ? req.query.from : '';
   const to = typeof req.query.to === 'string' ? req.query.to : '';
-  const isOrganizer = accountId ? accountById(accountId)?.role === 'organizer' : false;
+  const currentAccount = accountId ? accountById(accountId) : undefined;
+  const isOrganizer = currentAccount?.isActive === true && (currentAccount.role === 'organizer' || currentAccount.organizerEnabled || currentAccount.adminEnabled);
   let sql = `${eventSelect} WHERE e.status = 'published'`;
   const values: Array<string> = [];
   if (isOrganizer) sql = `${eventSelect} WHERE e.status IN ('published', 'draft')`;
@@ -348,16 +450,16 @@ app.get('/api/events/:id', (req, res) => {
   }
   if (row.status !== 'published') {
     const token = req.cookies[cookieName] as string | undefined;
-    let role: AccountRole | undefined;
+    let account: Account | undefined;
     if (token) {
       try {
         const payload = jwt.verify(token, jwtSecret);
-        if (typeof payload !== 'string' && typeof payload.sub === 'string') role = accountById(payload.sub)?.role;
+        if (typeof payload !== 'string' && typeof payload.sub === 'string') account = accountById(payload.sub);
       } catch {
-        role = undefined;
+        account = undefined;
       }
     }
-    if (role !== 'organizer') {
+    if (!account?.isActive || (account.role !== 'organizer' && !account.organizerEnabled && !account.adminEnabled)) {
       res.status(404).json({ error: 'Event not found.' });
       return;
     }
@@ -634,6 +736,298 @@ app.delete('/api/events/:id/register', requireAuth, requireRole('student'), (req
   res.json({ ok: true });
 });
 
+const attendanceRadiusMeters = 100;
+const locationSchema = z.object({
+  latitude: z.number().finite().min(-90).max(90),
+  longitude: z.number().finite().min(-180).max(180),
+  accuracy: z.number().finite().positive().max(500),
+});
+
+function distanceMeters(fromLat: number, fromLon: number, toLat: number, toLon: number): number {
+  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const latDiff = radians(toLat - fromLat);
+  const lonDiff = radians(toLon - fromLon);
+  const a = Math.sin(latDiff / 2) ** 2
+    + Math.cos(radians(fromLat)) * Math.cos(radians(toLat)) * Math.sin(lonDiff / 2) ** 2;
+  return 6_371_000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+app.get('/api/events/:id/attendance', requireAuth, (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const event = db.prepare('SELECT id, status, delivery_mode, start_at, end_at, organizer_id FROM events WHERE id = ?')
+    .get(req.params.id) as { id: string; status: string; delivery_mode: string; start_at: string; end_at: string; organizer_id: string } | undefined;
+  if (!event || event.status === 'cancelled') {
+    res.status(404).json({ error: 'Event not found.' });
+    return;
+  }
+  const session = db.prepare('SELECT opened_at, closed_at FROM attendance_sessions WHERE event_id = ?')
+    .get(event.id) as { opened_at: string; closed_at: string | null } | undefined;
+  const registration = req.account.role === 'student'
+    ? db.prepare('SELECT status FROM registrations WHERE event_id = ? AND account_id = ?').get(event.id, req.account.id) as { status: string } | undefined
+    : undefined;
+  const record = req.account.role === 'student'
+    ? db.prepare('SELECT checked_in_at FROM attendance_records WHERE event_id = ? AND account_id = ?').get(event.id, req.account.id) as { checked_in_at: string } | undefined
+    : undefined;
+  const canManage = (req.account.role === 'organizer' || req.account.organizerEnabled) && event.organizer_id === req.account.id;
+  const attendees = canManage ? db.prepare(`
+    SELECT display_name_snapshot AS displayName, email_snapshot AS email,
+      faculty_snapshot AS faculty, course_snapshot AS course, checked_in_at AS checkedInAt
+    FROM attendance_records WHERE event_id = ? ORDER BY checked_in_at ASC
+  `).all(event.id) : [];
+  const now = Date.now();
+  const ongoing = event.status === 'published' && now >= Date.parse(event.start_at) && now < Date.parse(event.end_at);
+  res.json({
+    session: session ? { status: session.closed_at ? 'closed' : 'open', openedAt: session.opened_at, closedAt: session.closed_at } : { status: 'not_open', openedAt: null, closedAt: null },
+    eventOngoing: ongoing,
+    canManage,
+    canAttend: req.account.role === 'student' && registration?.status === 'registered',
+    checkedInAt: record?.checked_in_at ?? null,
+    attendees,
+    radiusMeters: attendanceRadiusMeters,
+  });
+});
+
+app.post('/api/events/:id/attendance/open', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const parsed = locationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Share a valid current location to open attendance.' });
+    return;
+  }
+  const event = db.prepare('SELECT * FROM events WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
+  if (!event || event.status !== 'published') {
+    res.status(404).json({ error: 'Published event not found.' });
+    return;
+  }
+  if (String(event.organizer_id) !== req.account.id) {
+    res.status(403).json({ error: 'Only this event’s organizer can manage attendance.' });
+    return;
+  }
+  if (event.delivery_mode === 'online') {
+    res.status(409).json({ error: 'Location-based attendance is available for in-person or hybrid events.' });
+    return;
+  }
+  const now = Date.now();
+  if (now < Date.parse(String(event.start_at)) || now >= Date.parse(String(event.end_at))) {
+    res.status(409).json({ error: 'Attendance can only be opened while the event is ongoing.' });
+    return;
+  }
+  if (parsed.data.accuracy > attendanceRadiusMeters) {
+    res.status(400).json({ error: 'Your location is not precise enough. Try again outdoors or enable precise location.' });
+    return;
+  }
+  try {
+    db.prepare('INSERT INTO attendance_sessions (event_id, latitude, longitude, opened_at) VALUES (?, ?, ?, ?)')
+      .run(req.params.id, parsed.data.latitude, parsed.data.longitude, new Date().toISOString());
+  } catch {
+    res.status(409).json({ error: 'Attendance has already been opened or closed for this event.' });
+    return;
+  }
+  res.status(201).json({ ok: true });
+});
+
+app.post('/api/events/:id/attendance/close', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const event = db.prepare('SELECT organizer_id FROM events WHERE id = ?').get(req.params.id) as { organizer_id: string } | undefined;
+  if (!event) {
+    res.status(404).json({ error: 'Event not found.' });
+    return;
+  }
+  if (event.organizer_id !== req.account.id) {
+    res.status(403).json({ error: 'Only this event’s organizer can manage attendance.' });
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const close = db.transaction(() => {
+    const updated = db.prepare('UPDATE attendance_sessions SET closed_at = ? WHERE event_id = ? AND closed_at IS NULL')
+      .run(nowIso, req.params.id);
+    if (updated.changes !== 1) return false;
+    const registered = db.prepare("SELECT COUNT(*) AS count FROM registrations WHERE event_id = ? AND status = 'registered'")
+      .get(req.params.id) as { count: number };
+    const checkedIn = db.prepare('SELECT COUNT(*) AS count FROM attendance_records WHERE event_id = ?')
+      .get(req.params.id) as { count: number };
+    db.prepare('INSERT INTO attendance_history (id, event_id, registration_count, check_in_count) VALUES (?, ?, ?, ?)')
+      .run(randomUUID(), req.params.id, registered.count, checkedIn.count);
+    return true;
+  });
+  if (!close()) {
+    res.status(409).json({ error: 'Attendance is not open.' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/events/:id/attendance/check-in', requireAuth, requireRole('student'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const parsed = locationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Share a valid current location to check in.' });
+    return;
+  }
+  const event = db.prepare('SELECT status, start_at, end_at FROM events WHERE id = ?').get(req.params.id) as { status: string; start_at: string; end_at: string } | undefined;
+  if (!event || event.status !== 'published') {
+    res.status(404).json({ error: 'Published event not found.' });
+    return;
+  }
+  const now = Date.now();
+  if (now < Date.parse(event.start_at) || now >= Date.parse(event.end_at)) {
+    res.status(409).json({ error: 'Attendance can only be marked while the event is ongoing.' });
+    return;
+  }
+  const registration = db.prepare("SELECT status FROM registrations WHERE event_id = ? AND account_id = ?")
+    .get(req.params.id, req.account.id) as { status: string } | undefined;
+  if (registration?.status !== 'registered') {
+    res.status(403).json({ error: 'Only students with a confirmed registration can check in.' });
+    return;
+  }
+  const session = db.prepare('SELECT latitude, longitude, closed_at FROM attendance_sessions WHERE event_id = ?')
+    .get(req.params.id) as { latitude: number; longitude: number; closed_at: string | null } | undefined;
+  if (!session || session.closed_at) {
+    res.status(409).json({ error: 'The organizer has not opened attendance or has closed it.' });
+    return;
+  }
+  if (parsed.data.accuracy > 150) {
+    res.status(400).json({ error: 'Your location is not precise enough. Enable precise location and try again.' });
+    return;
+  }
+  const distance = distanceMeters(session.latitude, session.longitude, parsed.data.latitude, parsed.data.longitude);
+  if (distance > attendanceRadiusMeters) {
+    res.status(403).json({ error: `You must be within ${attendanceRadiusMeters} metres of the event location to check in.` });
+    return;
+  }
+  try {
+    db.prepare(`
+      INSERT INTO attendance_records
+        (id, event_id, account_id, display_name_snapshot, email_snapshot, faculty_snapshot, course_snapshot, checked_in_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      randomUUID(), req.params.id, req.account.id,
+      req.account.displayName, req.account.email, req.account.faculty, req.account.course,
+      new Date().toISOString(),
+    );
+  } catch {
+    res.status(409).json({ error: 'You have already checked in to this event.' });
+    return;
+  }
+  res.status(201).json({ ok: true });
+});
+
+const adminRoomSchema = z.object({
+  code: z.string().trim().min(1).max(40),
+  name: z.string().trim().min(1).max(120),
+  capacity: z.number().int().positive().max(10000),
+  facilities: z.array(z.string().trim().min(1).max(80)).max(40),
+  bufferMinutes: z.number().int().nonnegative().max(1440),
+  verified: z.boolean(),
+});
+
+app.get('/api/admin/users', requireAuth, requireRole('administrator'), (_req, res) => {
+  const users = db.prepare(`
+    SELECT id, email, display_name AS displayName, role, faculty, course,
+      organizer_enabled AS organizerEnabled, admin_enabled AS adminEnabled,
+      is_active AS isActive, created_at AS createdAt
+    FROM accounts ORDER BY created_at DESC
+  `).all();
+  res.json({ users });
+});
+
+app.patch('/api/admin/users/:id', requireAuth, requireRole('administrator'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const parsed = z.object({ isActive: z.boolean() }).safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Choose whether the account should be active.' });
+    return;
+  }
+  if (req.params.id === req.account.id && !parsed.data.isActive) {
+    res.status(409).json({ error: 'You cannot deactivate your own administrator account.' });
+    return;
+  }
+  const target = db.prepare('SELECT admin_enabled FROM accounts WHERE id = ?').get(req.params.id) as { admin_enabled: number } | undefined;
+  if (!target) {
+    res.status(404).json({ error: 'Account not found.' });
+    return;
+  }
+  if (target.admin_enabled === 1 && !parsed.data.isActive) {
+    const activeAdmins = db.prepare('SELECT COUNT(*) AS count FROM accounts WHERE admin_enabled = 1 AND is_active = 1').get() as { count: number };
+    if (activeAdmins.count <= 1) {
+      res.status(409).json({ error: 'At least one active administrator must remain.' });
+      return;
+    }
+  }
+  db.prepare('UPDATE accounts SET is_active = ? WHERE id = ?').run(Number(parsed.data.isActive), req.params.id);
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/rooms', requireAuth, requireRole('administrator'), (_req, res) => {
+  const rooms = db.prepare('SELECT id, code, name, capacity, facilities, buffer_minutes AS bufferMinutes, verified FROM rooms ORDER BY name')
+    .all() as Array<{ id: string; code: string; name: string; capacity: number; facilities: string; bufferMinutes: number; verified: number }>;
+  res.json({ rooms: rooms.map((room) => ({ ...room, facilities: parseJson<string[]>(room.facilities), bufferMinutes: room.bufferMinutes, verified: room.verified === 1 })) });
+});
+
+app.post('/api/admin/rooms', requireAuth, requireRole('administrator'), (req, res) => {
+  const parsed = adminRoomSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the room details.' });
+    return;
+  }
+  try {
+    db.prepare(`INSERT INTO rooms (id, code, name, capacity, facilities, buffer_minutes, verified) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(randomUUID(), parsed.data.code, parsed.data.name, parsed.data.capacity, JSON.stringify(parsed.data.facilities), parsed.data.bufferMinutes, Number(parsed.data.verified));
+  } catch {
+    res.status(409).json({ error: 'A room with that code already exists.' });
+    return;
+  }
+  res.status(201).json({ ok: true });
+});
+
+app.put('/api/admin/rooms/:id', requireAuth, requireRole('administrator'), (req, res) => {
+  const parsed = adminRoomSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the room details.' });
+    return;
+  }
+  const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(req.params.id);
+  if (!room) {
+    res.status(404).json({ error: 'Room not found.' });
+    return;
+  }
+  const bookings = db.prepare('SELECT expected_attendance, registration_capacity, required_facilities FROM events WHERE room_id = ? AND status != ?')
+    .all(req.params.id, 'cancelled') as Array<{ expected_attendance: number; registration_capacity: number; required_facilities: string }>;
+  if (!parsed.data.verified && bookings.length > 0) {
+    res.status(409).json({ error: 'A room with active event bookings cannot be marked unverified.' });
+    return;
+  }
+  const missing = bookings.some((event) => Number(event.expected_attendance) > parsed.data.capacity
+    || Number(event.registration_capacity) > parsed.data.capacity
+    || parseJson<string[]>(event.required_facilities).some((facility) => !parsed.data.facilities.includes(facility)));
+  if (missing) {
+    res.status(409).json({ error: 'Room changes would make an existing event booking invalid.' });
+    return;
+  }
+  try {
+    db.prepare(`UPDATE rooms SET code = ?, name = ?, capacity = ?, facilities = ?, buffer_minutes = ?, verified = ? WHERE id = ?`)
+      .run(parsed.data.code, parsed.data.name, parsed.data.capacity, JSON.stringify(parsed.data.facilities), parsed.data.bufferMinutes, Number(parsed.data.verified), req.params.id);
+  } catch {
+    res.status(409).json({ error: 'A room with that code already exists.' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
+app.delete('/api/admin/rooms/:id', requireAuth, requireRole('administrator'), (req, res) => {
+  const booking = db.prepare('SELECT 1 FROM events WHERE room_id = ? AND status != ? LIMIT 1').get(req.params.id, 'cancelled');
+  if (booking) {
+    res.status(409).json({ error: 'This room is assigned to an event. Reallocate or cancel the event before removing it.' });
+    return;
+  }
+  const removed = db.prepare('DELETE FROM rooms WHERE id = ?').run(req.params.id);
+  if (removed.changes !== 1) {
+    res.status(404).json({ error: 'Room not found.' });
+    return;
+  }
+  res.json({ ok: true });
+});
+
 app.get('/api/rooms', (_req, res) => {
   const rooms = db.prepare(`
     SELECT id, code, name, capacity, facilities, buffer_minutes
@@ -868,7 +1262,7 @@ app.patch('/api/me/profile', requireAuth, (req: AuthenticatedRequest, res) => {
   res.json({ account });
 });
 
-app.get('/api/organizer/analytics', requireAuth, requireRole('organizer'), (_req, res) => {
+app.get('/api/organizer/analytics', requireAuth, requireRole('organizer', 'administrator'), (_req, res) => {
   const totals = db.prepare(`
     SELECT COUNT(*) AS totalEvents,
       SUM(CASE WHEN status = 'published' AND start_at > ? THEN 1 ELSE 0 END) AS upcomingEvents,

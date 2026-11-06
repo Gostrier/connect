@@ -227,6 +227,54 @@
 .organizer-card strong { color: #394c65; font-size: 11px; }
 .organizer-card > svg { color: #478c77; }
 .details-about { margin-top: 23px; }
+.attendance-panel { display: grid; gap: 12px; margin-top: 22px; padding: 17px; background: #f8faff; border: 1px solid #e1e9f6; border-radius: 12px; }
+.attendance-panel-heading { display: flex; align-items: center; gap: 10px; }
+.attendance-icon { width: 34px; height: 34px; display: grid; place-items: center; color: #386bd0; background: #eaf1ff; border-radius: 10px; }
+.attendance-panel-heading h2 { margin: 0; color: #2b3f5b; font: 700 13px Manrope, sans-serif; }
+.attendance-panel-heading p, .attendance-description { margin: 4px 0 0; color: #77869b; font-size: 10px; line-height: 1.6; }
+.attendance-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.attendance-live { display: inline-flex; align-items: center; gap: 7px; color: #34785e; font-size: 10px; font-weight: 700; }
+.attendance-live i { width: 7px; height: 7px; background: #42aa7b; border-radius: 50%; box-shadow: 0 0 0 3px #42aa7b20; }
+.attendance-success { display: flex; align-items: center; gap: 8px; color: #34785e; font-size: 11px; font-weight: 700; }
+.attendance-feedback { margin: 0; color: #50749f; font-size: 10px; }
+.attendance-panel .form-error { margin: 0; }
+.workspace-switch { max-width: 130px; height: 32px; padding: 0 8px; color: #40536d; background: #f7f9fc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 10px; }
+.admin-shortcuts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.admin-shortcuts > button { display: flex; align-items: center; gap: 12px; min-height: 86px; padding: 16px; color: #3d6fc4; background: #fff; border: 1px solid var(--line); border-radius: 12px; text-align: left; }
+.admin-shortcuts > button > span { display: grid; flex: 1; gap: 5px; }
+.admin-shortcuts b { color: #2d405b; font-size: 12px; }
+.admin-shortcuts small { color: #7b899d; font-size: 10px; }
+.admin-user-list, .admin-room-list, .application-section { display: grid; gap: 10px; }
+.admin-user-card, .admin-room-card { display: flex; align-items: center; gap: 12px; padding: 13px; background: #fff; border: 1px solid var(--line); border-radius: 11px; }
+.admin-user-copy, .admin-room-card > div { display: grid; flex: 1; min-width: 0; gap: 4px; }
+.admin-user-copy b, .admin-room-card b { color: #344963; font-size: 11px; }
+.admin-user-copy small, .admin-room-card > div > span { overflow: hidden; color: #7e8ca0; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.admin-user-flags { display: flex; align-items: center; gap: 6px; }
+.admin-room-form { display: grid; gap: 13px; padding: 18px; }
+.admin-room-form h2 { margin: 0; color: #2d405b; font: 700 16px Manrope, sans-serif; }
+.admin-verified-check { display: flex; align-items: center; gap: 8px; color: #52647e; font-size: 11px; }
+.admin-verified-check input { width: 15px; height: 15px; }
+.application-form { display: grid; gap: 13px; padding: 18px; }
+.application-form > label, .application-card > label { display: grid; gap: 6px; color: #52647e; font-size: 10px; font-weight: 700; }
+.application-form input, .application-form textarea, .application-card textarea { width: 100%; padding: 10px; color: #40536d; background: #fbfcfe; border: 1px solid #e2e8f0; border-radius: 7px; font: inherit; font-size: 11px; }
+.application-section h2 { display: flex; align-items: center; gap: 8px; margin: 0; color: #2d405b; font: 700 16px Manrope, sans-serif; }
+.application-section h2 span { display: inline-grid; min-width: 20px; height: 20px; place-items: center; padding: 0 5px; color: #3566c2; background: #eaf1ff; border-radius: 11px; font: 700 10px 'DM Sans', sans-serif; }
+.application-card { display: grid; gap: 10px; padding: 15px; background: #fff; border: 1px solid var(--line); border-radius: 11px; }
+.application-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.application-card-heading > div { display: grid; gap: 4px; }
+.application-card-heading b { color: #344963; font-size: 11px; }
+.application-card-heading small, .application-card p { margin: 0; color: #78879b; font-size: 10px; line-height: 1.6; }
+.application-review-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.admin-room-card > b small { margin-left: 5px; color: #8a96aa; font-size: 9px; font-weight: 500; }
+.attendance-roster { display: grid; gap: 8px; margin-top: 3px; padding-top: 13px; border-top: 1px solid #e3eaf4; }
+.attendance-roster h3 { display: flex; align-items: center; gap: 7px; margin: 0 0 2px; color: #344963; font: 700 11px Manrope, sans-serif; }
+.attendance-roster h3 span { display: inline-grid; min-width: 19px; height: 19px; place-items: center; padding: 0 5px; color: #3566c2; background: #eaf1ff; border-radius: 10px; font: 700 9px 'DM Sans', sans-serif; }
+.attendance-student { display: flex; align-items: center; gap: 9px; padding: 9px; background: #fff; border: 1px solid #edf0f5; border-radius: 9px; }
+.attendance-student-avatar { flex: 0 0 auto; width: 29px; height: 29px; display: grid; place-items: center; color: #3866b5; background: #edf3ff; border-radius: 50%; font-size: 9px; font-weight: 800; }
+.attendance-student > div { display: grid; flex: 1; min-width: 0; gap: 2px; }
+.attendance-student b { overflow: hidden; color: #344963; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.attendance-student small, .attendance-student time { color: #7e8ca0; font-size: 9px; }
+.attendance-student time { flex: 0 0 auto; }
 .details-about h2 { margin: 0 0 8px; color: var(--navy); font: 800 17px Manrope, sans-serif; }
 .details-about p { color: #687a91; font-size: 11px; line-height: 1.75; }
 .registration-card { position: sticky; top: 88px; padding: 19px; background: #fff; border: 1px solid var(--line); border-radius: 13px; box-shadow: 0 7px 22px #1729410a; }
@@ -533,6 +581,7 @@
   .topbar { height: 58px; padding: 0 15px; }
   .breadcrumb { margin-right: auto; margin-left: 7px; font-size: 9px; }
   .topbar-actions { gap: 7px; }
+  .workspace-switch { max-width: 100px; height: 29px; padding: 0 5px; font-size: 8px; }
   .local-time-pill { display: none; }
   .topbar-profile .avatar { width: 28px; height: 28px; }
   .main-content { min-height: calc(100vh - 98px); padding: 23px 15px 37px; }
@@ -575,6 +624,11 @@
   .organizer-decoration { top: -20px; right: 10px; font-size: 120px; }
   .organizer-shortcuts { grid-template-columns: 1fr 1fr; gap: 8px; }
   .organizer-shortcuts > button { gap: 7px; padding: 10px 8px; }
+  .admin-shortcuts { grid-template-columns: 1fr; }
+  .admin-user-card, .admin-room-card { flex-wrap: wrap; gap: 8px; }
+  .admin-user-copy, .admin-room-card > div { flex-basis: calc(100% - 55px); }
+  .admin-user-flags { margin-left: 38px; }
+  .admin-room-card > .status-pill { margin-left: 43px; }
   .shortcut-icon { width: 29px; height: 29px; }
   .organizer-shortcuts b { font-size: 8px; }
   .organizer-shortcuts small { font-size: 7px; }

@@ -20,6 +20,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MapPin,
   MoreHorizontal,
   MessageSquareText,
   Plus,
@@ -56,9 +57,23 @@ type Screen =
   | 'create'
   | 'rooms'
   | 'conflicts'
+  | 'applications'
+  | 'admin-users'
   | 'analytics';
 
 type Recommendation = { event: CampusEvent; score: number; reasons: string[] };
+type AttendanceState = {
+  session: { status: 'not_open' | 'open' | 'closed'; openedAt: string | null; closedAt: string | null };
+  eventOngoing: boolean;
+  canManage: boolean;
+  canAttend: boolean;
+  checkedInAt: string | null;
+  radiusMeters: number;
+  attendees: AttendanceAttendee[];
+};
+type AttendanceAttendee = { displayName: string; email: string; faculty: string | null; course: string | null; checkedInAt: string };
+type ManagedRoom = { id: string; code: string; name: string; capacity: number; facilities: string[]; bufferMinutes: number; verified: boolean };
+type ManagedUser = { id: string; email: string; displayName: string; role: string; faculty: string | null; course: string | null; organizerEnabled: number; adminEnabled: number; isActive: number; createdAt: string };
 type RoomOption = {
   roomId: string;
   code: string;
@@ -199,7 +214,7 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
   onSuccess: (account: Account) => void;
 }) {
   const [mode, setMode] = useState(initialMode);
-  const [form, setForm] = useState({ displayName: '', email: '', password: '', invitationCode: '' });
+  const [form, setForm] = useState({ displayName: '', email: '', faculty: '', course: '', password: '', confirmPassword: '' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -242,18 +257,20 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
           <label>Email address
             <input required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="you@campusconnect.test" autoComplete="email" />
           </label>
+          {mode === 'signup' && <>
+            <label>Faculty
+              <input required maxLength={120} value={form.faculty} onChange={(event) => setForm({ ...form, faculty: event.target.value })} placeholder="e.g. School of Computing" autoComplete="organization-title" />
+            </label>
+            <label>Course
+              <input required maxLength={120} value={form.course} onChange={(event) => setForm({ ...form, course: event.target.value })} placeholder="e.g. Information Technology" autoComplete="organization" />
+            </label>
+          </>}
           <label>Password
             <input required minLength={mode === 'signup' ? 10 : 1} type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} placeholder={mode === 'signup' ? 'At least 10 characters' : 'Enter your password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
           </label>
-          {mode === 'signup' && (
-            <details className="invite-field">
-              <summary>Have an Organizer invitation?</summary>
-              <label>One-time invitation code
-                <input value={form.invitationCode} onChange={(event) => setForm({ ...form, invitationCode: event.target.value })} placeholder="Enter code" autoComplete="off" />
-              </label>
-              <span className="field-note">An invitation changes this account's single role to Organizer.</span>
-            </details>
-          )}
+          {mode === 'signup' && <label>Confirm password
+            <input required minLength={10} type="password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} placeholder="Enter your password again" autoComplete="new-password" />
+          </label>}
           {error && <div className="form-error" role="alert">{error}</div>}
           <button className="button button-primary button-wide" disabled={busy}>{busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'} <ArrowRight size={17} /></button>
         </form>
@@ -483,7 +500,7 @@ function DiscoveryPage({ events, onOpen, onRegister, onSave, savedIds }: {
   );
 }
 
-function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegistration, onBack, onEdit }: {
+function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegistration, onBack, onEdit, organizerWorkspace = false }: {
   event: CampusEvent;
   account: Account | null;
   saved: boolean;
@@ -492,6 +509,7 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
   onCancelRegistration: () => void;
   onBack: () => void;
   onEdit: () => void;
+  organizerWorkspace?: boolean;
 }) {
   const color = categoryColors[event.category] ?? 'blue';
   const share = async () => {
@@ -517,6 +535,7 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
           {event.meetingUrl && <a className="meeting-link" href={event.meetingUrl} target="_blank" rel="noreferrer">Open event link <ArrowUpRight size={15} /></a>}
           <div className="organizer-card"><span className="avatar">{initials(event.organizerName)}</span><div><small>Organized by</small><strong>{event.organizerName}</strong></div><ShieldCheck size={18} /></div>
           <section className="details-about"><h2>About this event</h2><p>{event.description}</p><p className="muted">Registration closes {formatDate(event.registrationClosesAt, { weekday: 'long', hour: '2-digit', minute: '2-digit' })}.</p></section>
+          {account && event.deliveryMode !== 'online' && <AttendancePanel eventId={event.id} role={account.role} />}
         </main>
         <aside className="registration-card">
           <span className="eyebrow">SAVE YOUR SEAT</span><strong>{event.seatsAvailable > 0 ? `${event.seatsAvailable} spots left` : 'Join the waitlist'}</strong>
@@ -529,10 +548,111 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
                 ? <button className="button button-primary button-wide" onClick={onRegister}>{event.seatsAvailable > 0 ? 'Register for free' : 'Join waitlist'} <ArrowRight size={16} /></button>
                 : <p className="field-note">Sign in as a Student to register.</p>}
           <div className="side-actions"><button className={`text-button ${saved ? 'saved-text' : ''}`} onClick={onSave}><Bookmark size={15} fill={saved ? 'currentColor' : 'none'} />{saved ? 'Saved' : 'Save event'}</button><button className="text-button" onClick={() => void share()}><Share2 size={15} />Share</button></div>
-          {account?.role === 'organizer' && <button className="button button-secondary button-wide" onClick={onEdit}>Edit event</button>}
+          {organizerWorkspace && <button className="button button-secondary button-wide" onClick={onEdit}>Edit event</button>}
         </aside>
       </div>
     </div>
+  );
+}
+
+function getCurrentLocation(): Promise<{ latitude: number; longitude: number; accuracy: number }> {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('This browser does not support location access.'));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => resolve({ latitude: coords.latitude, longitude: coords.longitude, accuracy: coords.accuracy }),
+      (error) => reject(new Error(error.code === error.PERMISSION_DENIED
+        ? 'Allow location access in your browser to continue.'
+        : error.code === error.TIMEOUT
+          ? 'Could not get your location in time. Try again.'
+          : 'Your location is unavailable. Check your device settings and try again.')),
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 20_000 },
+    );
+  });
+}
+
+function AttendancePanel({ eventId, role }: { eventId: string; role: Account['role'] }) {
+  const [attendance, setAttendance] = useState<AttendanceState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const refresh = useCallback(async () => {
+    const result = await api<AttendanceState>(`/events/${eventId}/attendance`);
+    setAttendance(result);
+  }, [eventId]);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const result = await api<AttendanceState>(`/events/${eventId}/attendance`);
+        if (mounted) setAttendance(result);
+      } catch (reason) {
+        if (mounted) setError(reason instanceof Error ? reason.message : 'Attendance status could not be loaded.');
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 15_000);
+    return () => { mounted = false; window.clearInterval(timer); };
+  }, [eventId]);
+
+  const act = async (action: 'open' | 'close' | 'check-in') => {
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const location = action === 'close' ? undefined : await getCurrentLocation();
+      await api(`/events/${eventId}/attendance/${action}`, {
+        method: 'POST',
+        ...(location ? { body: JSON.stringify(location) } : {}),
+      });
+      setMessage(action === 'open' ? 'Attendance is open. Students can check in at this location.' : action === 'close' ? 'Attendance is closed.' : 'Your attendance has been marked.');
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Attendance could not be updated.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const organizerView = attendance?.canManage ?? role === 'organizer';
+  if (role === 'organizer' && attendance && !attendance.canManage) return null;
+  return (
+    <section className="attendance-panel">
+      <div className="attendance-panel-heading"><span className="attendance-icon"><MapPin size={18} /></span><div><h2>Event attendance</h2><p>Location check-in within {attendance?.radiusMeters ?? 100} m</p></div></div>
+      {loading ? <p className="field-note">Loading attendance status…</p> : attendance && (
+        <>
+          {organizerView && <p className="attendance-description">Open attendance while you are at the event. The location at opening becomes the check-in point.</p>}
+          {!organizerView && !attendance.canAttend && <p className="attendance-description">Check-in is available to students with a confirmed registration.</p>}
+          {organizerView
+            ? attendance.session.status === 'open'
+              ? <div className="attendance-actions"><span className="attendance-live"><i /> Attendance is open</span><button className="button button-secondary button-small" disabled={busy} onClick={() => void act('close')}>{busy ? 'Closing…' : 'Close attendance'}</button></div>
+              : attendance.session.status === 'closed'
+                ? <div className="attendance-success"><CheckCircle2 size={17} /> Attendance is closed.</div>
+                : <button className="button button-primary button-small" disabled={busy || !attendance.eventOngoing} onClick={() => void act('open')}>{busy ? 'Getting location…' : attendance.eventOngoing ? 'Open attendance at this location' : 'Available during the event'}</button>
+            : attendance.checkedInAt
+            ? <div className="attendance-success"><CheckCircle2 size={17} /> Attendance marked at {formatTime(attendance.checkedInAt)}.</div>
+              : attendance.session.status === 'open' && attendance.eventOngoing && attendance.canAttend
+                ? <button className="button button-primary button-small" disabled={busy} onClick={() => void act('check-in')}>{busy ? 'Checking location…' : 'Mark my attendance'}</button>
+                : <p className="field-note">{attendance.session.status === 'closed' ? 'The organizer has closed attendance.' : attendance.session.status === 'not_open' ? 'The organizer has not opened attendance yet.' : attendance.eventOngoing ? 'A confirmed registration is required to check in.' : 'Check-in is available while the event is ongoing.'}</p>}
+          {attendance.canManage && attendance.attendees.length > 0 && <div className="attendance-roster">
+            <h3>Checked-in students <span>{attendance.attendees.length}</span></h3>
+            {attendance.attendees.map((student) => <div className="attendance-student" key={student.email}>
+              <span className="attendance-student-avatar">{initials(student.displayName)}</span>
+              <div><b>{student.displayName}</b><small>{student.email}</small><small>{[student.course, student.faculty].filter(Boolean).join(' · ') || 'Student'}</small></div>
+              <time>{formatTime(student.checkedInAt)}</time>
+            </div>)}
+          </div>}
+        </>
+      )}
+      {message && <p className="attendance-feedback" role="status">{message}</p>}
+      {error && <p className="form-error" role="alert">{error}</p>}
+    </section>
   );
 }
 
@@ -646,7 +766,7 @@ function ProfilePage({ account, onUpdate }: { account: Account; onUpdate: (patch
       <PageTitle eyebrow="YOUR CAMPUS, YOUR WAY" title="Profile & interests" description="Keep the details that make recommendations useful. You can leave any field blank." />
       <form className="profile-layout" onSubmit={(event) => void submit(event)}>
         <section className="panel profile-card">
-          <div className="profile-person"><span className="profile-avatar">{initials(account.displayName)}</span><div><h2>{account.displayName}</h2><span>{account.email}</span></div><span className="role-pill">{account.role}</span></div>
+          <div className="profile-person"><span className="profile-avatar">{initials(account.displayName)}</span><div><h2>{account.displayName}</h2><span>{account.email}</span></div><span className="role-pill">{account.adminEnabled ? 'Administrator' : account.organizerEnabled ? 'Student · Organizer' : account.role}</span></div>
           <label>Faculty or school<input value={faculty} onChange={(event) => setFaculty(event.target.value)} placeholder="Optional" /></label>
           <label>Course of study<input value={course} onChange={(event) => setCourse(event.target.value)} placeholder="Optional" /></label>
           <fieldset><legend>What are you curious about?</legend><div className="chip-select-list">{categories.map((item) => <button type="button" className={`select-chip ${interests.includes(item) ? 'selected' : ''}`} key={item} onClick={() => toggle(interests, setInterests, item)}>{interests.includes(item) && <Check size={13} />}{item}</button>)}</div></fieldset>
@@ -684,6 +804,117 @@ function OrganizerEventsPage({ events, onOpen, onNavigate, onPublish, onCancel }
       <PageTitle eyebrow="ORGANIZER WORKSPACE" title="Manage events" description="Keep the campus calendar clear, current, and easy to trust." action={<button className="button button-primary" onClick={() => onNavigate('create')}><Plus size={16} /> Create event</button>} />
       <div className="segmented-control table-tabs"><button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>All events</button><button className={filter === 'published' ? 'active' : ''} onClick={() => setFilter('published')}>Published</button><button className={filter === 'draft' ? 'active' : ''} onClick={() => setFilter('draft')}>Drafts</button></div>
       {visible.length ? <div className="manage-event-list">{visible.map((event) => <article className="manage-event-row" key={event.id}><div className={`manage-event-mark ${categoryColors[event.category] ?? 'blue'}`}>{categoryIcons[event.category] ?? '✦'}</div><div className="manage-event-copy"><button className="event-title-button" onClick={() => onOpen(event)}>{event.title}</button><span>{formatDate(event.startAt)} · {modeLabels[event.deliveryMode]} · {event.registeredCount} registered · {event.waitlistCount} waiting</span></div><span className={`status-pill status-${event.status}`}>{event.status}</span><div className="manage-event-actions">{event.status === 'draft' && <button className="button button-small button-secondary" onClick={() => onPublish(event)}>Publish</button>}<button className="button button-small button-secondary" onClick={() => onOpen(event)}>Edit</button><button className="icon-button danger-icon" onClick={() => onCancel(event)} aria-label={`Cancel ${event.title}`}><X size={17} /></button></div></article>)}</div> : <EmptyState icon={<CalendarDays />} title="No events in this view" description="Create an event to start building the campus calendar." action={<button className="button button-primary" onClick={() => onNavigate('create')}>Create event</button>} />}
+    </div>
+  );
+}
+
+type OrganizerApplication = {
+  id: string;
+  clubName: string;
+  position: string;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected' | 'withdrawn';
+  createdAt: string;
+  reviewedAt: string | null;
+  reviewNote: string | null;
+  applicantName?: string;
+  applicantEmail?: string;
+  faculty?: string | null;
+  course?: string | null;
+};
+
+function OrganizerApplicationsPage({ account, canReview, onAccountUpdated }: {
+  account: Account;
+  canReview: boolean;
+  onAccountUpdated: (account: Account) => void;
+}) {
+  const [mine, setMine] = useState<OrganizerApplication[]>([]);
+  const [queue, setQueue] = useState<OrganizerApplication[]>([]);
+  const [clubName, setClubName] = useState(account.clubs[0] ?? '');
+  const [position, setPosition] = useState('');
+  const [reason, setReason] = useState('');
+  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const refresh = useCallback(async () => {
+    const [ownResult, accountResult] = await Promise.all([
+      api<{ applications: OrganizerApplication[] }>('/organizer-applications/mine'),
+      api<{ account: Account }>('/auth/me'),
+    ]);
+    setMine(ownResult.applications);
+    onAccountUpdated(accountResult.account);
+    if (canReview) {
+      const result = await api<{ applications: OrganizerApplication[] }>('/organizer-applications/review');
+      setQueue(result.applications);
+    }
+  }, [canReview, onAccountUpdated]);
+  useEffect(() => { void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : 'Applications could not be loaded.')); }, [refresh]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setError('');
+    setBusy(true);
+    try {
+      await api('/organizer-applications', { method: 'POST', body: JSON.stringify({ clubName, position, reason }) });
+      setPosition('');
+      setReason('');
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The application could not be submitted.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const withdraw = async (id: string) => {
+    setError('');
+    try {
+      await api(`/organizer-applications/${id}/withdraw`, { method: 'POST' });
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The application could not be withdrawn.');
+    }
+  };
+
+  const review = async (application: OrganizerApplication, decision: 'approve' | 'reject') => {
+    setError('');
+    setBusy(true);
+    try {
+      await api(`/organizer-applications/${application.id}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ decision, note: reviewNotes[application.id] ?? '' }),
+      });
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The application could not be reviewed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="page-stack">
+      <PageTitle eyebrow="CLUB ORGANIZING" title={canReview ? 'Organizer applications' : 'Apply to become an organizer'} description="Students can apply from their existing account. Each club can have at most three pending or approved applications and organizers." />
+      {!canReview && !account.organizerEnabled && !account.adminEnabled && account.role === 'student' && <form className="application-form panel" onSubmit={(event) => void submit(event)}>
+        <label>Club or organization<input required minLength={2} maxLength={120} value={clubName} onChange={(event) => setClubName(event.target.value)} placeholder="e.g. Tech Society" /></label>
+        <label>Your position in the club<input required minLength={2} maxLength={100} value={position} onChange={(event) => setPosition(event.target.value)} placeholder="e.g. Chairperson" /></label>
+        <label>Why do you want to organize events?<textarea required minLength={20} maxLength={1500} rows={4} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Tell reviewers about your role and the events you plan to organize." /></label>
+        <p className="field-note">Faculty and course come from your profile. A pending application reserves one of the club’s three places. Rejected or withdrawn applications free their place.</p>
+        {error && <div className="form-error" role="alert">{error}</div>}
+        <button className="button button-primary" disabled={busy}>{busy ? 'Submitting…' : 'Submit application'} <ArrowRight size={16} /></button>
+      </form>}
+      {account.organizerEnabled && account.role === 'student' && !canReview && <div className="success-banner"><CheckCircle2 size={18} />Your Organizer access is approved. Switch to the Organizer workspace to manage events.</div>}
+      {mine.length > 0 && <section className="application-section"><h2>My applications</h2>{mine.map((application) => <article className="application-card" key={application.id}>
+        <div className="application-card-heading"><div><b>{application.clubName}</b><small>{application.position} · Submitted {formatDate(application.createdAt, { year: 'numeric' })}</small></div><span className={`status-pill status-${application.status === 'approved' ? 'on' : application.status === 'rejected' ? 'error' : application.status === 'withdrawn' ? 'muted' : 'draft'}`}>{application.status}</span></div>
+        <p>{application.reason}</p>{application.reviewNote && <small className="field-note">Reviewer note: {application.reviewNote}</small>}
+        {application.status === 'pending' && <button className="text-button" onClick={() => void withdraw(application.id)}>Withdraw application</button>}
+      </article>)}</section>}
+      {canReview && <section className="application-section"><h2>Pending review <span>{queue.length}</span></h2>{queue.length ? queue.map((application) => <article className="application-card" key={application.id}>
+        <div className="application-card-heading"><div><b>{application.applicantName} · {application.clubName}</b><small>{application.applicantEmail} · {application.position}</small><small>{[application.course, application.faculty].filter(Boolean).join(' · ')}</small></div><small>{formatDate(application.createdAt, { year: 'numeric' })}</small></div>
+        <p>{application.reason}</p><label>Review note<textarea maxLength={500} rows={2} value={reviewNotes[application.id] ?? ''} onChange={(event) => setReviewNotes((current) => ({ ...current, [application.id]: event.target.value }))} placeholder="Optional note for the applicant" /></label>
+        <div className="application-review-actions"><button className="button button-secondary button-small" disabled={busy} onClick={() => void review(application, 'reject')}>Decline</button><button className="button button-primary button-small" disabled={busy} onClick={() => void review(application, 'approve')}>Approve organizer</button></div>
+      </article>) : <EmptyState icon={<CheckCircle2 />} title="No applications waiting" description="New club organizer applications will appear here." />}</section>}
+      {!mine.length && !canReview && !account.organizerEnabled && <div className="application-section"><h2>My applications</h2><p className="field-note">You haven’t submitted an application yet.</p></div>}
     </div>
   );
 }
@@ -855,6 +1086,103 @@ function Brand({ compact = false }: { compact?: boolean }) {
   return <div className={`brand ${compact ? 'brand-compact' : ''}`}><span className="brand-mark"><GraduationCap size={21} /></span><span>campus<span className="brand-connect">connect</span><small>YOUR CAMPUS, CONNECTED</small></span></div>;
 }
 
+function AdministratorDashboard({ onNavigate }: { onNavigate: (screen: Screen) => void }) {
+  return <div className="page-stack">
+    <PageTitle eyebrow="ADMINISTRATOR WORKSPACE" title="Campus administration" description="Manage accounts and verified rooms, review organizer applications, and view campus reports." />
+    <section className="admin-shortcuts">
+      <button onClick={() => onNavigate('admin-users')}><Users size={20} /><span><b>Manage users</b><small>View accounts and enable or suspend access</small></span><ArrowRight size={16} /></button>
+      <button onClick={() => onNavigate('rooms')}><DoorOpen size={20} /><span><b>Manage rooms</b><small>Maintain verified venue capacity and facilities</small></span><ArrowRight size={16} /></button>
+      <button onClick={() => onNavigate('applications')}><ShieldCheck size={20} /><span><b>Approve organizers</b><small>Review club applications and the three person cap</small></span><ArrowRight size={16} /></button>
+      <button onClick={() => onNavigate('analytics')}><ArrowUpRight size={20} /><span><b>Generate reports</b><small>Review campus events and attendance estimates</small></span><ArrowRight size={16} /></button>
+    </section>
+  </div>;
+}
+
+function AdminUsersPage() {
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [error, setError] = useState('');
+  const [busyId, setBusyId] = useState('');
+  const refresh = useCallback(async () => {
+    const result = await api<{ users: ManagedUser[] }>('/admin/users');
+    setUsers(result.users);
+  }, []);
+  useEffect(() => { void refresh().catch((reason) => setError(reason instanceof Error ? reason.message : 'Users could not be loaded.')); }, [refresh]);
+  const toggleActive = async (user: ManagedUser) => {
+    setBusyId(user.id);
+    setError('');
+    try {
+      await api(`/admin/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ isActive: !user.isActive }) });
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'User access could not be updated.');
+    } finally { setBusyId(''); }
+  };
+  return <div className="page-stack">
+    <PageTitle eyebrow="ACCOUNT DIRECTORY" title="Manage users" description="Review student, organizer, and administrator accounts. Deactivated accounts can no longer sign in." />
+    {error && <div className="form-error" role="alert">{error}</div>}
+    {users.length ? <div className="admin-user-list">{users.map((user) => <article className="admin-user-card" key={user.id}>
+      <span className="avatar">{initials(user.displayName)}</span><div className="admin-user-copy"><b>{user.displayName}</b><small>{user.email}</small><small>{[user.course, user.faculty].filter(Boolean).join(' · ') || 'No faculty or course entered'}</small></div>
+      <div className="admin-user-flags"><span className={`status-pill ${user.isActive ? 'status-on' : 'status-error'}`}>{user.isActive ? 'Active' : 'Inactive'}</span>{user.adminEnabled ? <span className="role-pill">Administrator</span> : user.organizerEnabled || user.role === 'organizer' ? <span className="role-pill">Organizer</span> : <span className="role-pill">Student</span>}</div>
+      {!user.adminEnabled && <button className={`button button-small ${user.isActive ? 'button-secondary' : 'button-primary'}`} disabled={busyId === user.id} onClick={() => void toggleActive(user)}>{busyId === user.id ? 'Saving…' : user.isActive ? 'Deactivate' : 'Reactivate'}</button>}
+    </article>)}</div> : <div className="loading-panel">Loading accounts…</div>}
+  </div>;
+}
+
+function AdminRoomsPage() {
+  const empty = { code: '', name: '', capacity: 30, facilities: '', bufferMinutes: 0, verified: false };
+  const [rooms, setRooms] = useState<ManagedRoom[]>([]);
+  const [form, setForm] = useState(empty);
+  const [editingId, setEditingId] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const refresh = useCallback(async () => {
+    const result = await api<{ rooms: ManagedRoom[] }>('/admin/rooms');
+    setRooms(result.rooms);
+  }, []);
+  useEffect(() => { void refresh().catch((reason) => setError(reason instanceof Error ? reason.message : 'Rooms could not be loaded.')); }, [refresh]);
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    const payload = { ...form, facilities: form.facilities.split(',').map((item) => item.trim()).filter(Boolean) };
+    try {
+      await api(editingId ? `/admin/rooms/${editingId}` : '/admin/rooms', { method: editingId ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+      setForm(empty);
+      setEditingId('');
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The room could not be saved.');
+    } finally { setBusy(false); }
+  };
+  const edit = (room: ManagedRoom) => {
+    setEditingId(room.id);
+    setForm({ code: room.code, name: room.name, capacity: room.capacity, facilities: room.facilities.join(', '), bufferMinutes: room.bufferMinutes, verified: room.verified });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+  const remove = async (room: ManagedRoom) => {
+    setError('');
+    try {
+      await api(`/admin/rooms/${room.id}`, { method: 'DELETE' });
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The room could not be removed.');
+    }
+  };
+  return <div className="page-stack">
+    <PageTitle eyebrow="VENUE INVENTORY" title="Manage rooms" description="Add and maintain room facts. Only verified rooms can be allocated to events." />
+    <form className="admin-room-form panel" onSubmit={(event) => void save(event)}>
+      <h2>{editingId ? 'Edit room' : 'Add a room'}</h2>
+      <div className="form-two-col"><label>Room code<input required maxLength={40} value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} placeholder="e.g. LIB-101" /></label><label>Room name<input required maxLength={120} value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="e.g. Library Seminar Room" /></label></div>
+      <div className="form-two-col"><label>Capacity<input required type="number" min={1} max={10000} value={form.capacity} onChange={(event) => setForm({ ...form, capacity: Number(event.target.value) })} /></label><label>Setup buffer (minutes)<input required type="number" min={0} max={1440} value={form.bufferMinutes} onChange={(event) => setForm({ ...form, bufferMinutes: Number(event.target.value) })} /></label></div>
+      <label>Facilities, separated by commas<input value={form.facilities} onChange={(event) => setForm({ ...form, facilities: event.target.value })} placeholder="Projector, Internet" /></label>
+      <label className="admin-verified-check"><input type="checkbox" checked={form.verified} onChange={(event) => setForm({ ...form, verified: event.target.checked })} /> Mark these room details as verified</label>
+      {error && <div className="form-error" role="alert">{error}</div>}
+      <div className="form-actions"><button className="button button-primary" disabled={busy}>{busy ? 'Saving…' : editingId ? 'Save room' : 'Add room'}</button>{editingId && <button type="button" className="button button-secondary" onClick={() => { setEditingId(''); setForm(empty); }}>Cancel edit</button>}</div>
+    </form>
+    {rooms.length ? <div className="admin-room-list">{rooms.map((room) => <article className="admin-room-card" key={room.id}><span className="event-summary-icon"><DoorOpen size={19} /></span><div><b>{room.name} <small>{room.code}</small></b><span>{room.capacity} seats · {room.facilities.join(', ') || 'No facilities listed'} · {room.bufferMinutes} min buffer</span></div><span className={`status-pill ${room.verified ? 'status-on' : 'status-muted'}`}>{room.verified ? 'Verified' : 'Unverified'}</span><button className="button button-small button-secondary" onClick={() => edit(room)}>Edit</button><button className="button button-small button-secondary" onClick={() => void remove(room)}>Remove</button></article>)}</div> : <EmptyState icon={<DoorOpen />} title="No rooms yet" description="Add room details and mark them verified before organizers can allocate them." />}
+  </div>;
+}
+
 const studentNav = [
   { id: 'dashboard' as const, label: 'Home', icon: LayoutDashboard },
   { id: 'discover' as const, label: 'Discover', icon: Compass },
@@ -863,6 +1191,7 @@ const studentNav = [
 const studentMoreNav = [
   { id: 'recommendations' as const, label: 'For you', icon: Sparkles },
   { id: 'notifications' as const, label: 'Notifications', icon: Bell },
+  { id: 'applications' as const, label: 'Apply to organize', icon: Users },
   { id: 'profile' as const, label: 'Profile & interests', icon: Heart },
 ];
 const organizerNav = [
@@ -877,9 +1206,20 @@ const organizerMoreNav = [
   { id: 'notifications' as const, label: 'Notifications', icon: Bell },
   { id: 'profile' as const, label: 'Profile', icon: Heart },
 ];
+const administratorNav = [
+  { id: 'dashboard' as const, label: 'Overview', icon: LayoutDashboard },
+  { id: 'admin-users' as const, label: 'Users', icon: Users },
+  { id: 'rooms' as const, label: 'Rooms', icon: DoorOpen },
+  { id: 'analytics' as const, label: 'Reports', icon: ArrowUpRight },
+];
+const administratorMoreNav = [
+  { id: 'applications' as const, label: 'Organizer applications', icon: ShieldCheck },
+  { id: 'profile' as const, label: 'Profile', icon: Heart },
+];
 
 export default function App() {
   const [account, setAccount] = useState<Account | null>(null);
+  const [workspace, setWorkspace] = useState<'student' | 'organizer' | 'administrator'>('student');
   const [screen, setScreen] = useState<Screen>('landing');
   const [events, setEvents] = useState<CampusEvent[]>([]);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
@@ -895,9 +1235,12 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('campusconnect-saved') ?? '[]') as string[]; } catch { return []; }
   });
   const selectedEvent = events.find((event) => event.id === selectedId) ?? null;
-  const organizer = account?.role === 'organizer';
-  const nav = organizer ? organizerNav : studentNav;
-  const secondaryNav = organizer ? organizerMoreNav : studentMoreNav;
+  const administrator = account?.adminEnabled === true && workspace === 'administrator';
+  const organizer = !administrator && (account?.role === 'organizer' || (account?.organizerEnabled === true && workspace === 'organizer'));
+  const hasOrganizerWorkspace = account?.role === 'organizer' || account?.organizerEnabled === true;
+  const hasAdminWorkspace = account?.adminEnabled === true;
+  const nav = administrator ? administratorNav : organizer ? organizerNav : studentNav;
+  const secondaryNav = administrator ? administratorMoreNav : organizer ? organizerMoreNav : studentMoreNav;
   const secondaryNavActive = secondaryNav.some(({ id }) => id === screen);
   const showSecondaryNav = moreNavOpen || secondaryNavActive;
 
@@ -924,7 +1267,7 @@ export default function App() {
 
   useEffect(() => {
     api<{ account: Account }>('/auth/me')
-      .then(async (result) => { setAccount(result.account); setScreen('dashboard'); await loadData(result.account); })
+      .then(async (result) => { setAccount(result.account); setWorkspace(result.account.adminEnabled ? 'administrator' : result.account.role === 'organizer' ? 'organizer' : 'student'); setScreen('dashboard'); await loadData(result.account); })
       .catch(() => undefined)
       .finally(() => setBusy(false));
     api<{ events: CampusEvent[] }>('/events').then((result) => setEvents(result.events)).catch(() => undefined);
@@ -951,6 +1294,7 @@ export default function App() {
 
   const handleAuth = async (nextAccount: Account) => {
     setAccount(nextAccount);
+    setWorkspace(nextAccount.adminEnabled ? 'administrator' : nextAccount.role === 'organizer' ? 'organizer' : 'student');
     setAuthMode(null);
     setScreen('dashboard');
     try { await loadData(nextAccount); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Some data could not be loaded.'); }
@@ -960,6 +1304,7 @@ export default function App() {
   const signOut = async () => {
     await api('/auth/logout', { method: 'POST' });
     setAccount(null);
+    setWorkspace('student');
     setScreen('landing');
     setEvents([]);
     setRecommendations([]);
@@ -1078,17 +1423,21 @@ export default function App() {
   const activeEvent = selectedEvent;
   const unread = notifications.filter((item) => !item.readAt).length;
   const content = (() => {
-    if (screen === 'details' && activeEvent) return <EventDetails event={activeEvent} account={account} saved={savedIds.includes(activeEvent.id)} onSave={() => toggleSaved(activeEvent.id)} onRegister={() => void register(activeEvent)} onCancelRegistration={() => void cancelRegistration(activeEvent)} onBack={() => navigate(account.role === 'organizer' ? 'events' : 'discover')} onEdit={() => { setSelectedId(activeEvent.id); navigate('create'); }} />;
+    if (screen === 'details' && activeEvent) return <EventDetails event={activeEvent} account={account} saved={savedIds.includes(activeEvent.id)} organizerWorkspace={organizer} onSave={() => toggleSaved(activeEvent.id)} onRegister={() => void register(activeEvent)} onCancelRegistration={() => void cancelRegistration(activeEvent)} onBack={() => navigate(organizer ? 'events' : 'discover')} onEdit={() => { setSelectedId(activeEvent.id); navigate('create'); }} />;
     if (screen === 'discover') return <DiscoveryPage events={events} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} savedIds={savedIds} />;
     if (screen === 'calendar') return <CalendarPage events={events} onOpen={openEvent} />;
     if (screen === 'recommendations') return <RecommendationsPage items={recommendations} onOpen={openEvent} onRegister={(event) => void register(event)} />;
     if (screen === 'notifications') return <NotificationsPage notifications={notifications} onRead={(item) => void markRead(item)} />;
+    if (screen === 'applications') return <OrganizerApplicationsPage account={account} canReview={administrator} onAccountUpdated={setAccount} />;
+    if (screen === 'admin-users' && administrator) return <AdminUsersPage />;
     if (screen === 'profile') return <ProfilePage account={account} onUpdate={updateProfile} />;
     if (screen === 'events') return <OrganizerEventsPage events={events} onOpen={openEvent} onNavigate={navigate} onPublish={(event) => void publishEvent(event)} onCancel={(event) => void cancelEvent(event)} />;
     if (screen === 'create') return <CreateEventPage key={selectedEvent?.id ?? 'new'} editing={selectedEvent} onSave={createOrUpdateEvent} onRooms={(event) => { setSelectedId(event.id); navigate('rooms'); }} />;
+    if (screen === 'rooms' && administrator) return <AdminRoomsPage />;
     if (screen === 'rooms' || screen === 'conflicts') return <RoomsPage events={events} selectedId={selectedId} onSelectEvent={setSelectedId} onConfirmRoom={confirmRoom} conflictsOnly={screen === 'conflicts'} />;
     if (screen === 'analytics') return <AnalyticsPage events={events} />;
-    if (account.role === 'organizer') return <OrganizerDashboard events={events} onNavigate={navigate} onOpen={openEvent} />;
+    if (administrator) return <AdministratorDashboard onNavigate={navigate} />;
+    if (organizer) return <OrganizerDashboard events={events} onNavigate={navigate} onOpen={openEvent} />;
     return <StudentDashboard account={account} events={events} recommendations={recommendations} onNavigate={navigate} onOpen={openEvent} onRegister={(event) => void register(event)} savedIds={savedIds} onSave={toggleSaved} />;
   })();
 
@@ -1112,12 +1461,12 @@ export default function App() {
           </div>
         </nav>
         <div className="sidebar-spacer" />
-        <div className="sidebar-help"><span className="help-mark"><GraduationCap size={18} /></span><b>A little campus magic</b><small>Thoughtful events start with a good plan.</small><button onClick={() => navigate(organizer ? 'analytics' : 'recommendations')}>Explore <ArrowRight size={13} /></button></div>
-        <button className="sidebar-account" onClick={() => navigate('profile')}><span className="avatar">{initials(account.displayName)}</span><span><b>{account.displayName}</b><small>{account.role === 'organizer' ? 'Event organizer' : 'Student account'}</small></span><ChevronDown size={16} /></button>
+        <div className="sidebar-help"><span className="help-mark"><GraduationCap size={18} /></span><b>A little campus magic</b><small>Thoughtful events start with a good plan.</small><button onClick={() => navigate(administrator ? 'analytics' : organizer ? 'analytics' : 'recommendations')}>Explore <ArrowRight size={13} /></button></div>
+        <button className="sidebar-account" onClick={() => navigate('profile')}><span className="avatar">{initials(account.displayName)}</span><span><b>{account.displayName}</b><small>{administrator ? 'Administrator' : organizer ? 'Event organizer' : 'Student account'}</small></span><ChevronDown size={16} /></button>
       </aside>
       {mobileMenu && <button className="mobile-backdrop" onClick={() => setMobileMenu(false)} aria-label="Close menu" />}
       <main className="main-shell">
-        <header className="topbar"><button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={20} /></button><div className="breadcrumb"><span>CampusConnect</span><ChevronRight size={14} /><b>{screen === 'dashboard' ? 'Overview' : screen.replace('-', ' ')}</b></div><div className="topbar-actions"><span className="local-time-pill"><span /> Africa/Nairobi</span><button className="icon-button notification-button" onClick={() => navigate('notifications')} aria-label={`${unread} unread notifications`}><Bell size={18} />{unread > 0 && <i>{unread}</i>}</button><button className="topbar-profile" onClick={() => navigate('profile')}><span className="avatar">{initials(account.displayName)}</span><ChevronDown size={14} /></button><button className="icon-button signout-button" onClick={() => void signOut()} aria-label="Sign out"><LogOut size={17} /></button></div></header>
+        <header className="topbar"><button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={20} /></button><div className="breadcrumb"><span>CampusConnect</span><ChevronRight size={14} /><b>{screen === 'dashboard' ? 'Overview' : screen.replace('-', ' ')}</b></div><div className="topbar-actions">{(hasOrganizerWorkspace || hasAdminWorkspace) && <select className="workspace-switch" aria-label="Workspace" value={workspace} onChange={(event) => { setWorkspace(event.target.value as 'student' | 'organizer' | 'administrator'); setScreen('dashboard'); setMoreNavOpen(false); }}>{account.role === 'student' && <option value="student">Student</option>}{hasOrganizerWorkspace && <option value="organizer">Organizer</option>}{hasAdminWorkspace && <option value="administrator">Administrator</option>}</select>}<span className="local-time-pill"><span /> Africa/Nairobi</span><button className="icon-button notification-button" onClick={() => navigate('notifications')} aria-label={`${unread} unread notifications`}><Bell size={18} />{unread > 0 && <i>{unread}</i>}</button><button className="topbar-profile" onClick={() => navigate('profile')}><span className="avatar">{initials(account.displayName)}</span><ChevronDown size={14} /></button><button className="icon-button signout-button" onClick={() => void signOut()} aria-label="Sign out"><LogOut size={17} /></button></div></header>
         <div className="main-content">
           {error && <div className="inline-error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss error"><X size={15} /></button></div>}
           {content}
