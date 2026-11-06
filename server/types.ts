@@ -5,6 +5,9 @@ export interface Account {
   email: string;
   displayName: string;
   role: AccountRole;
+  organizerEnabled: boolean;
+  adminEnabled: boolean;
+  isActive: boolean;
   faculty: string | null;
   course: string | null;
   interests: string[];

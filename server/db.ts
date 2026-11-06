@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
@@ -20,6 +20,9 @@ db.exec(`
     display_name TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('student', 'organizer')),
+    organizer_enabled INTEGER NOT NULL DEFAULT 0,
+    admin_enabled INTEGER NOT NULL DEFAULT 0,
+    is_active INTEGER NOT NULL DEFAULT 1,
     faculty TEXT,
     course TEXT,
     interests TEXT NOT NULL DEFAULT '[]',
@@ -37,6 +40,11 @@ db.exec(`
     facilities TEXT NOT NULL,
     buffer_minutes INTEGER NOT NULL DEFAULT 0 CHECK (buffer_minutes >= 0),
     verified INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS events (
@@ -121,13 +129,21 @@ db.exec(`
     UNIQUE (event_id, account_id)
   );
 
-  CREATE TABLE IF NOT EXISTS organizer_invitations (
+  CREATE TABLE IF NOT EXISTS organizer_applications (
     id TEXT PRIMARY KEY,
-    code_hash TEXT NOT NULL UNIQUE,
-    expires_at TEXT,
-    used_at TEXT,
-    created_at TEXT NOT NULL
+    applicant_id TEXT NOT NULL REFERENCES accounts(id),
+    club_name TEXT NOT NULL,
+    club_key TEXT NOT NULL,
+    position TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn')),
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    reviewer_id TEXT REFERENCES accounts(id),
+    review_note TEXT
   );
+  CREATE INDEX IF NOT EXISTS organizer_applications_club_status
+    ON organizer_applications(club_key, status);
 `);
 
 const eventColumns = db.pragma('table_info(events)') as Array<{ name: string }>;
@@ -136,6 +152,15 @@ if (!eventColumns.some((column) => column.name === 'registration_capacity_custom
 }
 
 const accountColumns = db.pragma('table_info(accounts)') as Array<{ name: string }>;
+if (!accountColumns.some((column) => column.name === 'organizer_enabled')) {
+  db.exec('ALTER TABLE accounts ADD COLUMN organizer_enabled INTEGER NOT NULL DEFAULT 0');
+}
+if (!accountColumns.some((column) => column.name === 'admin_enabled')) {
+  db.exec('ALTER TABLE accounts ADD COLUMN admin_enabled INTEGER NOT NULL DEFAULT 0');
+}
+if (!accountColumns.some((column) => column.name === 'is_active')) {
+  db.exec('ALTER TABLE accounts ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1');
+}
 if (!accountColumns.some((column) => column.name === 'in_app_preferences')) {
   db.exec("ALTER TABLE accounts ADD COLUMN in_app_preferences TEXT NOT NULL DEFAULT '{}'");
 }
@@ -190,6 +215,11 @@ for (const [email, name, role, faculty, course, interests, clubs] of demoAccount
     now.toISOString(),
   );
 }
+
+const configuredAdmins = (process.env.ADMIN_EMAILS ?? '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean);
+db.prepare('UPDATE accounts SET admin_enabled = 0').run();
+const enableAdmin = db.prepare('UPDATE accounts SET admin_enabled = 1 WHERE email = ? COLLATE NOCASE');
+for (const email of configuredAdmins) enableAdmin.run(email);
 
 const organizer = db.prepare('SELECT id FROM accounts WHERE email = ?').get('organizer@campusconnect.test') as { id: string };
 const insertEvent = db.prepare(`
@@ -352,13 +382,8 @@ const insertHistory = db.prepare(`
   ['history-3', 'demo-community-health', 53, 47],
 ].forEach((row) => insertHistory.run(...row));
 
-const inviteCode = process.env.ORGANIZER_INVITE_CODE ?? 'local-organizer-invite';
-db.prepare(`
-  INSERT OR IGNORE INTO organizer_invitations (id, code_hash, created_at)
-  VALUES (?, ?, ?)
-`).run(randomUUID(), createHash('sha256').update(inviteCode).digest('hex'), now.toISOString());
-
 export function loadVerifiedRoomInventory(): void {
+  if (db.prepare('SELECT 1 FROM app_settings WHERE key = ?').get('room_inventory_imported')) return;
   const inventoryPath = path.resolve('data/rooms.json');
   const contents = readFileSync(inventoryPath, 'utf8');
   const inventorySchema = z.array(z.object({
@@ -376,12 +401,7 @@ export function loadVerifiedRoomInventory(): void {
   const upsert = db.prepare(`
     INSERT INTO rooms (id, code, name, capacity, facilities, buffer_minutes, verified)
     VALUES (?, ?, ?, ?, ?, ?, 1)
-    ON CONFLICT(code) DO UPDATE SET
-      name = excluded.name,
-      capacity = excluded.capacity,
-      facilities = excluded.facilities,
-      buffer_minutes = excluded.buffer_minutes,
-      verified = 1
+    ON CONFLICT(code) DO NOTHING
   `);
   const transaction = db.transaction((rooms: typeof inventory) => {
     for (const room of rooms) {
@@ -396,4 +416,5 @@ export function loadVerifiedRoomInventory(): void {
     }
   });
   transaction(inventory);
+  db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run('room_inventory_imported', new Date().toISOString());
 }
