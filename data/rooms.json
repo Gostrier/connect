@@ -1,1 +1,72 @@
-[]
+[
+  {
+    "code": "NAUD",
+    "name": "New Auditorium",
+    "capacity": 300,
+    "facilities": ["Wi-Fi", "Projector"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "OAUD",
+    "name": "Old Auditorium",
+    "capacity": 500,
+    "facilities": ["Wi-Fi", "Projector"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "SAGINI",
+    "name": "Sagini Hall",
+    "capacity": 300,
+    "facilities": ["Wi-Fi", "Projector"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "PV1",
+    "name": "Pavilion",
+    "capacity": 600,
+    "facilities": ["Wi-Fi"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "PV2",
+    "name": "Pavilion",
+    "capacity": 600,
+    "facilities": ["Wi-Fi"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "TC21",
+    "name": "TC 21",
+    "capacity": 300,
+    "facilities": ["Wi-Fi"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "TC22",
+    "name": "TC 22",
+    "capacity": 150,
+    "facilities": ["Wi-Fi", "Projector"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "TC33",
+    "name": "TC 33",
+    "capacity": 300,
+    "facilities": ["Wi-Fi", "Projector"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "TC41",
+    "name": "TC 41",
+    "capacity": 100,
+    "facilities": ["Projector"],
+    "bufferMinutes": 0
+  },
+  {
+    "code": "TC53",
+    "name": "TC 53",
+    "capacity": 150,
+    "facilities": ["Wi-Fi", "Projector"],
+    "bufferMinutes": 0
+  }
+]

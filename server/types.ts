@@ -37,6 +37,7 @@ export interface EventRecord {
   status: 'draft' | 'published' | 'cancelled';
   organizerName: string;
   isDemo: boolean;
+  isEventOrganizer: boolean;
   registeredCount: number;
   waitlistCount: number;
   seatsAvailable: number;

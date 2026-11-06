@@ -38,6 +38,7 @@ export interface CampusEvent {
   status: 'draft' | 'published' | 'cancelled';
   organizerName: string;
   isDemo: boolean;
+  isEventOrganizer: boolean;
   registeredCount: number;
   waitlistCount: number;
   seatsAvailable: number;
@@ -102,7 +103,7 @@ export const categories = [
   'Community Service',
 ];
 
-export const facilities = ['Projector', 'Internet', 'Computer Lab', 'Conference Equipment'];
+export const facilities = ['Projector', 'Wi-Fi', 'Internet', 'Computer Lab', 'Conference Equipment'];
 export const modeLabels: Record<DeliveryMode, string> = {
   in_person: 'In-person',
   online: 'Online',

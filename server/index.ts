@@ -147,6 +147,7 @@ function mapEvent(row: Record<string, unknown>, accountId?: string): EventRecord
     status: row.status as EventRecord['status'],
     organizerName: String(row.organizer_name ?? ''),
     isDemo: Number(row.is_demo) === 1,
+    isEventOrganizer: Boolean(accountId && row.organizer_id === accountId),
     registeredCount: Number(row.registered_count ?? 0),
     waitlistCount: Number(row.waitlist_count ?? 0),
     seatsAvailable: Math.max(0, Number(row.registration_capacity) - Number(row.registered_count ?? 0)),
@@ -629,8 +630,15 @@ app.post('/api/events/:id/publish', requireAuth, requireRole('organizer'), (req,
       return;
     }
   }
-  db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?')
-    .run('published', new Date().toISOString(), req.params.id);
+  const nowIso = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare('UPDATE events SET status = ?, updated_at = ? WHERE id = ?')
+      .run('published', nowIso, req.params.id);
+    db.prepare(`
+      INSERT OR IGNORE INTO registrations (id, event_id, account_id, status, created_at, updated_at)
+      VALUES (?, ?, ?, 'registered', ?, ?)
+    `).run(randomUUID(), req.params.id, String(row.organizer_id), nowIso, nowIso);
+  })();
   res.json({ ok: true });
 });
 

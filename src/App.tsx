@@ -49,6 +49,7 @@ type Screen =
   | 'dashboard'
   | 'discover'
   | 'details'
+  | 'publish'
   | 'calendar'
   | 'recommendations'
   | 'notifications'
@@ -388,6 +389,7 @@ function StudentDashboard({ account, events, recommendations, onNavigate, onOpen
           <button className="quick-action" onClick={() => onNavigate('discover')}><span className="quick-icon blue"><Search size={18} /></span><span><b>Explore events</b><small>Find something new</small></span><ArrowUpRight size={16} /></button>
           <button className="quick-action" onClick={() => onNavigate('calendar')}><span className="quick-icon lavender"><CalendarDays size={18} /></span><span><b>Open my calendar</b><small>See your upcoming plans</small></span><ArrowUpRight size={16} /></button>
           <button className="quick-action" onClick={() => onNavigate('profile')}><span className="quick-icon amber"><Heart size={18} /></span><span><b>Update interests</b><small>Make recommendations yours</small></span><ArrowUpRight size={16} /></button>
+          <button className="quick-action" onClick={() => onNavigate('applications')}><span className="quick-icon green"><Users size={18} /></span><span><b>Apply to organize</b><small>Help lead your club’s events</small></span><ArrowUpRight size={16} /></button>
         </div>
       </section>
       <section className="section-block compact-section">
@@ -539,8 +541,10 @@ function EventDetails({ event, account, saved, onSave, onRegister, onCancelRegis
         </main>
         <aside className="registration-card">
           <span className="eyebrow">SAVE YOUR SEAT</span><strong>{event.seatsAvailable > 0 ? `${event.seatsAvailable} spots left` : 'Join the waitlist'}</strong>
-          <p>Free to attend. Your registration can be cancelled any time before the event starts.</p>
-          {account?.role === 'student' && event.currentRegistrationStatus === 'registered'
+          <p>{event.isEventOrganizer ? 'You’re automatically registered as the event organizer.' : 'Free to attend. Your registration can be cancelled any time before the event starts.'}</p>
+          {event.isEventOrganizer && event.currentRegistrationStatus === 'registered'
+            ? <div className="attendance-success"><CheckCircle2 size={17} />You’re on the attendee list.</div>
+            : account?.role === 'student' && event.currentRegistrationStatus === 'registered'
             ? <button className="button button-secondary button-wide" onClick={onCancelRegistration}>Cancel registration</button>
             : account?.role === 'student' && event.currentRegistrationStatus === 'waitlisted'
               ? <><div className="waitlist-position">You’re <b>#{event.currentWaitlistPosition ?? '—'}</b> in the first-in, first-out queue.</div><button className="button button-waitlist button-wide" onClick={onCancelRegistration}>Leave waitlist</button></>
@@ -919,10 +923,11 @@ function OrganizerApplicationsPage({ account, canReview, onAccountUpdated }: {
   );
 }
 
-function CreateEventPage({ onSave, editing, onRooms }: {
+function CreateEventPage({ onSave, editing, onRooms, onPublishReview }: {
   onSave: (payload: Record<string, unknown>) => Promise<CampusEvent>;
   editing: CampusEvent | null;
   onRooms: (event: CampusEvent) => void;
+  onPublishReview: (event: CampusEvent) => void;
 }) {
   const initialStart = new Date(Date.now() + 4 * 24 * 60 * 60_000);
   initialStart.setHours(14, 0, 0, 0);
@@ -969,7 +974,8 @@ function CreateEventPage({ onSave, editing, onRooms }: {
     }
   };
   if (savedEvent) {
-    return <div className="page-stack"><PageTitle eyebrow="DRAFT SAVED" title="Your event is taking shape." description="It will stay private until you publish it." /><div className="next-step-card"><div className="next-step-icon"><CheckCircle2 size={24} /></div><div><h2>{savedEvent.title}</h2><p>Next, confirm a room for an in-person event or add a meeting link for an online event.</p></div>{savedEvent.deliveryMode !== 'online' && <button className="button button-primary" onClick={() => onRooms(savedEvent)}>Find a room <ArrowRight size={16} /></button>}</div><div className="form-actions"><button className="button button-secondary" onClick={() => setSavedEvent(null)}>Continue editing</button><button className="button button-secondary" onClick={() => onRooms(savedEvent)}>Room allocation</button></div></div>;
+    const needsRoom = savedEvent.deliveryMode !== 'online' && !savedEvent.roomId;
+    return <div className="page-stack"><PageTitle eyebrow="DRAFT SAVED" title="Your event is taking shape." description="It will stay private until you publish it." /><div className="next-step-card"><div className="next-step-icon"><CheckCircle2 size={24} /></div><div><h2>{savedEvent.title}</h2><p>{needsRoom ? 'Confirm a room before reviewing and publishing this event.' : 'Review the event details, then publish it when you’re ready.'}</p></div><button className="button button-primary" onClick={() => needsRoom ? onRooms(savedEvent) : onPublishReview(savedEvent)}>{needsRoom ? 'Find a room' : 'Review and publish'} <ArrowRight size={16} /></button></div><div className="form-actions"><button className="button button-secondary" onClick={() => setSavedEvent(null)}>Continue editing</button>{needsRoom && <button className="button button-secondary" onClick={() => onRooms(savedEvent)}>Room allocation</button>}</div></div>;
   }
   return (
     <div className="page-stack">
@@ -996,6 +1002,28 @@ function CreateEventPage({ onSave, editing, onRooms }: {
       </form>
     </div>
   );
+}
+
+function PublishEventPage({ event, onPublish, onEdit }: {
+  event: CampusEvent | null;
+  onPublish: (event: CampusEvent) => void;
+  onEdit: (event: CampusEvent) => void;
+}) {
+  if (!event) return <EmptyState icon={<CalendarDays />} title="Draft not found" description="Return to your events and choose a draft to review." />;
+  return <div className="page-stack">
+    <PageTitle eyebrow="FINAL REVIEW" title="Ready to publish?" description="Check the event details before making it visible to students." />
+    <section className="publish-review panel">
+      <div className="publish-review-top"><span className={`category-pill ${categoryColors[event.category] ?? 'blue'}`}>{event.category}</span><span className="status-pill status-draft">Draft</span></div>
+      <h2>{event.title}</h2>
+      <p className="publish-review-description">{event.description}</p>
+      <div className="publish-review-facts">
+        <div><CalendarDays size={17} /><span><b>{formatDate(event.startAt, { weekday: 'long', year: 'numeric' })}</b><small>{formatTime(event.startAt)}–{formatTime(event.endAt)} · East Africa Time</small></span></div>
+        <div><DoorOpen size={17} /><span><b>{event.roomName ?? (event.deliveryMode === 'online' ? 'Online event' : 'Room not assigned')}</b><small>{modeLabels[event.deliveryMode]}</small></span></div>
+        <div><Users size={17} /><span><b>{event.registrationCapacity} places</b><small>Expected attendance: {event.expectedAttendance}</small></span></div>
+      </div>
+      <div className="publish-review-actions"><button className="button button-secondary" onClick={() => onEdit(event)}>Edit details</button><button className="button button-primary" onClick={() => onPublish(event)}>Publish event <ArrowRight size={16} /></button></div>
+    </section>
+  </div>;
 }
 
 function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflictsOnly }: {
@@ -1354,6 +1382,9 @@ export default function App() {
       await api(`/events/${event.id}/publish`, { method: 'POST' });
       const refreshed = await api<{ events: CampusEvent[] }>('/events');
       setEvents(refreshed.events);
+      setSelectedId(event.id);
+      setScreen('details');
+      setMoreNavOpen(false);
       flash('Your event is now published.');
     } catch (reason) {
       flash(reason instanceof Error ? reason.message : 'The event could not be published.');
@@ -1383,7 +1414,10 @@ export default function App() {
       await api(`/events/${eventId}/room`, { method: 'POST', body: JSON.stringify({ roomId }) });
       const refreshed = await api<{ events: CampusEvent[] }>('/events');
       setEvents(refreshed.events);
-      flash('Room allocation confirmed.');
+      setSelectedId(eventId);
+      setScreen('publish');
+      setMoreNavOpen(false);
+      flash('Room confirmed. Review the event before publishing.');
     } catch (reason) {
       flash(reason instanceof Error ? reason.message : 'Room allocation failed.');
     }
@@ -1424,6 +1458,7 @@ export default function App() {
   const unread = notifications.filter((item) => !item.readAt).length;
   const content = (() => {
     if (screen === 'details' && activeEvent) return <EventDetails event={activeEvent} account={account} saved={savedIds.includes(activeEvent.id)} organizerWorkspace={organizer} onSave={() => toggleSaved(activeEvent.id)} onRegister={() => void register(activeEvent)} onCancelRegistration={() => void cancelRegistration(activeEvent)} onBack={() => navigate(organizer ? 'events' : 'discover')} onEdit={() => { setSelectedId(activeEvent.id); navigate('create'); }} />;
+    if (screen === 'publish') return <PublishEventPage event={selectedEvent} onPublish={(event) => void publishEvent(event)} onEdit={(event) => { setSelectedId(event.id); navigate('create'); }} />;
     if (screen === 'discover') return <DiscoveryPage events={events} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} savedIds={savedIds} />;
     if (screen === 'calendar') return <CalendarPage events={events} onOpen={openEvent} />;
     if (screen === 'recommendations') return <RecommendationsPage items={recommendations} onOpen={openEvent} onRegister={(event) => void register(event)} />;
@@ -1432,7 +1467,7 @@ export default function App() {
     if (screen === 'admin-users' && administrator) return <AdminUsersPage />;
     if (screen === 'profile') return <ProfilePage account={account} onUpdate={updateProfile} />;
     if (screen === 'events') return <OrganizerEventsPage events={events} onOpen={openEvent} onNavigate={navigate} onPublish={(event) => void publishEvent(event)} onCancel={(event) => void cancelEvent(event)} />;
-    if (screen === 'create') return <CreateEventPage key={selectedEvent?.id ?? 'new'} editing={selectedEvent} onSave={createOrUpdateEvent} onRooms={(event) => { setSelectedId(event.id); navigate('rooms'); }} />;
+    if (screen === 'create') return <CreateEventPage key={selectedEvent?.id ?? 'new'} editing={selectedEvent} onSave={createOrUpdateEvent} onRooms={(event) => { setSelectedId(event.id); navigate('rooms'); }} onPublishReview={(event) => { setSelectedId(event.id); navigate('publish'); }} />;
     if (screen === 'rooms' && administrator) return <AdminRoomsPage />;
     if (screen === 'rooms' || screen === 'conflicts') return <RoomsPage events={events} selectedId={selectedId} onSelectEvent={setSelectedId} onConfirmRoom={confirmRoom} conflictsOnly={screen === 'conflicts'} />;
     if (screen === 'analytics') return <AnalyticsPage events={events} />;

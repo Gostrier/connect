@@ -201,6 +201,7 @@ const demoPasswordHash = bcrypt.hashSync('CampusDemo!2026', 10);
 const demoAccounts = [
   ['student@campusconnect.test', 'Nia Wanjiku', 'student', 'School of Computing', 'Information Technology', ['Academic & Research', 'Career & Networking'], ['Tech Society']],
   ['organizer@campusconnect.test', 'Amani Otieno', 'organizer', 'School of Computing', 'Information Technology', ['Academic & Research'], ['Tech Society']],
+  ['admin@campusconnect.test', 'Campus Administrator', 'student', 'Campus Administration', 'Administration', [], []],
   ['samira@campusconnect.test', 'Samira Kibet', 'student', 'School of Business', 'Entrepreneurship', ['Career & Networking', 'Clubs & Social'], ['Business Club']],
   ['kiptoo@campusconnect.test', 'Kiptoo Maina', 'student', 'School of Health Sciences', 'Public Health', ['Community Service', 'Sports & Wellness'], ['Health Society']],
 ] as const;
@@ -220,7 +221,8 @@ for (const [email, name, role, faculty, course, interests, clubs] of demoAccount
   );
 }
 
-const configuredAdmins = (process.env.ADMIN_EMAILS ?? '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean);
+const environmentAdmins = (process.env.ADMIN_EMAILS ?? '').split(',').map((email) => email.trim().toLowerCase()).filter(Boolean);
+const configuredAdmins = environmentAdmins.length ? environmentAdmins : ['admin@campusconnect.test'];
 db.prepare('UPDATE accounts SET admin_enabled = 0').run();
 const enableAdmin = db.prepare('UPDATE accounts SET admin_enabled = 1 WHERE email = ? COLLATE NOCASE');
 for (const email of configuredAdmins) enableAdmin.run(email);
@@ -391,7 +393,8 @@ const insertHistory = db.prepare(`
 ].forEach((row) => insertHistory.run(...row));
 
 export function loadVerifiedRoomInventory(): void {
-  if (db.prepare('SELECT 1 FROM app_settings WHERE key = ?').get('room_inventory_imported')) return;
+  const importState = db.prepare('SELECT value FROM app_settings WHERE key = ?').get('room_inventory_imported') as { value: string } | undefined;
+  if (importState?.value === '3') return;
   const inventoryPath = path.resolve('data/rooms.json');
   const contents = readFileSync(inventoryPath, 'utf8');
   const inventorySchema = z.array(z.object({
@@ -409,7 +412,9 @@ export function loadVerifiedRoomInventory(): void {
   const upsert = db.prepare(`
     INSERT INTO rooms (id, code, name, capacity, facilities, buffer_minutes, verified)
     VALUES (?, ?, ?, ?, ?, ?, 1)
-    ON CONFLICT(code) DO NOTHING
+    ON CONFLICT(code) DO UPDATE SET
+      facilities = excluded.facilities,
+      verified = 1
   `);
   const transaction = db.transaction((rooms: typeof inventory) => {
     for (const room of rooms) {
@@ -424,5 +429,5 @@ export function loadVerifiedRoomInventory(): void {
     }
   });
   transaction(inventory);
-  db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run('room_inventory_imported', new Date().toISOString());
+  db.prepare('INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)').run('room_inventory_imported', '3');
 }

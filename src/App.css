@@ -254,6 +254,16 @@
 .admin-room-form h2 { margin: 0; color: #2d405b; font: 700 16px Manrope, sans-serif; }
 .admin-verified-check { display: flex; align-items: center; gap: 8px; color: #52647e; font-size: 11px; }
 .admin-verified-check input { width: 15px; height: 15px; }
+.publish-review { display: grid; gap: 15px; padding: 22px; }
+.publish-review-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.publish-review h2 { margin: 0; color: var(--navy); font: 800 23px/1.25 Manrope, sans-serif; }
+.publish-review-description { margin: 0; color: #718098; font-size: 12px; line-height: 1.7; }
+.publish-review-facts { display: grid; gap: 10px; padding: 14px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.publish-review-facts > div { display: flex; align-items: center; gap: 10px; color: #6980a0; }
+.publish-review-facts > div > span { display: grid; gap: 3px; }
+.publish-review-facts b { color: #344963; font-size: 11px; }
+.publish-review-facts small { color: #8290a4; font-size: 9px; }
+.publish-review-actions { display: flex; justify-content: flex-end; gap: 9px; }
 .application-form { display: grid; gap: 13px; padding: 18px; }
 .application-form > label, .application-card > label { display: grid; gap: 6px; color: #52647e; font-size: 10px; font-weight: 700; }
 .application-form input, .application-form textarea, .application-card textarea { width: 100%; padding: 10px; color: #40536d; background: #fbfcfe; border: 1px solid #e2e8f0; border-radius: 7px; font: inherit; font-size: 11px; }
