@@ -29,6 +29,7 @@ import {
   Share2,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Users,
   X,
 } from 'lucide-react';
@@ -42,6 +43,7 @@ import {
   modeLabels,
   type Account,
   type CampusEvent,
+  type CampusClub,
   type NotificationItem,
 } from './types';
 
@@ -49,10 +51,17 @@ type Screen =
   | 'landing'
   | 'dashboard'
   | 'discover'
+  | 'events-by-day'
+  | 'room-schedule'
+  | 'events-by-day'
   | 'details'
   | 'publish'
   | 'calendar'
   | 'registered'
+  | 'registrations'
+  | 'attendance-history'
+  | 'weekly-schedule'
+  | 'club-profile'
   | 'saved'
   | 'recommendations'
   | 'notifications'
@@ -62,6 +71,10 @@ type Screen =
   | 'rooms'
   | 'conflicts'
   | 'applications'
+  | 'clubs'
+  | 'create-club'
+  | 'admin-clubs'
+  | 'club-approvals'
   | 'admin-users'
   | 'analytics';
 
@@ -179,6 +192,7 @@ function EventCard({ event, onOpen, onRegister, onSave, saved }: {
       <div className="event-card-body">
         <div className="event-card-meta">
           <span className={`category-pill ${color}`}>{event.category}</span>
+          <span className="event-source-pill">{event.eventScope === 'university' ? 'University' : event.eventScope === 'faculty' ? event.faculty : event.clubName ?? 'Club event'}</span>
           {event.isDemo && <span className="demo-tag">Sample</span>}
         </div>
         <button className="event-title-button" onClick={onOpen}>{event.title}</button>
@@ -212,6 +226,104 @@ function EmptyState({ icon, title, description, action }: {
       {action}
     </div>
   );
+}
+
+const clubCategories = ['Technology', 'Business', 'Innovation', 'Academic', 'Sports', 'Leadership', 'Arts & Culture', 'Community Service'];
+
+function ClubsPage({ organizer, onOpenClub, refreshKey = 0, searchEnabled = false }: { organizer: boolean; onOpenClub: (club: CampusClub) => void; refreshKey?: number; searchEnabled?: boolean }) {
+  const [clubs, setClubs] = useState<CampusClub[]>([]);
+  const [search, setSearch] = useState('');
+  const [error, setError] = useState('');
+  const [busyId, setBusyId] = useState('');
+  const refresh = useCallback(async () => {
+    const result = await api<{ clubs: CampusClub[] }>('/clubs');
+    setClubs(result.clubs);
+  }, []);
+  useEffect(() => { void refresh().catch((reason) => setError(reason.message)); }, [refresh, refreshKey]);
+  const filtered = clubs.filter((club) => `${club.name} ${club.category} ${club.description}`.toLowerCase().includes(search.toLowerCase()));
+  const act = async (club: CampusClub, action: 'join' | 'follow' | 'unfollow') => {
+    setBusyId(club.id); setError('');
+    try { await api(`/clubs/${club.id}/membership`, { method: 'POST', body: JSON.stringify({ action }) }); await refresh(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Club action failed.'); }
+    finally { setBusyId(''); }
+  };
+  return <div className="page-stack">
+    <PageTitle eyebrow={organizer ? 'ORGANIZER WORKSPACE' : 'CAMPUS COMMUNITY'} title="Clubs & Societies" description={organizer ? 'Build your community and keep its events connected.' : 'Find the communities, people, and events that make campus yours.'} action={organizer ? <button className="button button-primary" onClick={() => onOpenClub({ id: '', name: '', category: clubCategories[0], description: '', vision: '', mission: '', logo: null, contactEmail: '', contactPhone: '', organizerId: '', organizerName: '', memberCount: 0, upcomingEvents: 0, activeEvents: 0, attendanceRate: 0, status: 'pending', submittedAt: null, reviewedAt: null, reviewNote: null, membershipStatus: null, followed: false })}><Plus size={16} /> Create club</button> : undefined} />
+    {searchEnabled && <div className="discover-search"><Search size={19} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search clubs, interests, or categories" aria-label="Search clubs" /></div>}
+    {error && <div className="form-error" role="alert">{error}</div>}
+    {filtered.length ? <div className="club-grid">{filtered.map((club) => <article className="club-card" key={club.id}>
+      {club.logo ? <img src={club.logo} alt={`${club.name} logo`} /> : <div className={`club-logo ${categoryColors[club.category] ?? 'blue'}`}>{initials(club.name)}</div>}
+      <div className="club-card-copy"><span className="category-pill blue">{club.category}</span><h2>{club.name}</h2><p>{club.description}</p><div className="club-card-stats"><span><Users size={14} />{club.memberCount} members</span><span><CalendarDays size={14} />{club.upcomingEvents} upcoming</span></div></div>
+      <div className="club-card-actions">{organizer ? <><span className={`status-pill ${club.status === 'active' ? 'status-on' : club.status === 'rejected' || club.status === 'suspended' ? 'status-error' : 'status-draft'}`}>{club.status === 'active' ? 'Active' : club.status === 'pending' ? 'Pending Approval' : club.status}</span><button className="button button-secondary button-small" onClick={() => onOpenClub(club)}>Manage club</button></> : <><button className="button button-primary button-small" disabled={busyId === club.id || club.membershipStatus === 'member' || club.membershipStatus === 'pending'} onClick={() => void act(club, 'join')}>{club.membershipStatus === 'member' ? 'Member' : club.membershipStatus === 'pending' ? 'Request pending' : 'Join Club'}</button><button className="button button-secondary button-small" disabled={busyId === club.id} onClick={() => void act(club, club.followed ? 'unfollow' : 'follow')}>{club.followed ? 'Following' : 'Follow Club'}</button><button className="text-button" onClick={() => onOpenClub(club)}>View Club <ArrowRight size={14} /></button></>}</div>
+    </article>)}</div> : <EmptyState icon={<Users />} title="No clubs found" description={organizer ? 'Create your first club to start welcoming members.' : 'Try another search, or check back as campus groups join.'} />}
+  </div>;
+}
+
+type ClubMember = { id: string; studentName: string; registrationNumber: string | null; faculty: string | null; applicationDate: string; status: string };
+function ClubManageDialog({ club, onClose, onSaved, onCreateEvent, onOpenEvent }: { club: CampusClub; onClose: () => void; onSaved: () => void; onCreateEvent: (club: CampusClub) => void; onOpenEvent: (event: CampusEvent) => void }) {
+  const [form, setForm] = useState({ name: club.name, category: club.category, description: club.description, vision: club.vision, mission: club.mission, logo: club.logo ?? '', contactEmail: club.contactEmail, contactPhone: club.contactPhone });
+  const [members, setMembers] = useState<ClubMember[]>([]); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const [clubEvents, setClubEvents] = useState<CampusEvent[]>([]);
+  const [reports, setReports] = useState<{ membershipGrowth: Array<{ month: string; count: number }>; eventReports: Array<{ id: string; title: string; startAt: string; registrations: number; attendance: number }>; activeMembers: Array<{ name: string; attendanceCount: number }>; totals: { events: number; registrations: number; attendance: number } } | null>(null);
+  const refresh = useCallback(async () => { if (club.id) { const [memberResult, eventResult, reportResult] = await Promise.all([api<{ members: ClubMember[] }>(`/clubs/${club.id}/members`), api<{ events: CampusEvent[] }>(`/clubs/${club.id}/events`), api<NonNullable<typeof reports>>(`/clubs/${club.id}/reports`)]); setMembers(memberResult.members); setClubEvents(eventResult.events); setReports(reportResult); } }, [club.id]);
+  useEffect(() => { void refresh().catch(() => undefined); }, [refresh]);
+  const update = (key: string, value: string) => setForm((current) => ({ ...current, [key]: value }));
+  const save = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(''); try { await api(club.id ? `/clubs/${club.id}` : '/clubs', { method: club.id ? 'PUT' : 'POST', body: JSON.stringify({ ...form, logo: form.logo || null }) }); onSaved(); onClose(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Club could not be saved.'); } finally { setBusy(false); } };
+  const review = async (member: ClubMember, decision: 'approve' | 'reject') => { try { await api(`/clubs/${club.id}/membership/${member.id}/review`, { method: 'POST', body: JSON.stringify({ decision }) }); await refresh(); onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Membership request could not be reviewed.'); } };
+  return <div className="modal-backdrop" role="presentation"><div className="modal-card club-dialog" role="dialog" aria-modal="true" aria-label={club.id ? `Manage ${club.name}` : 'Create club'}><div className="modal-heading"><div><p className="eyebrow">ORGANIZER CLUB MANAGEMENT</p><h2>{club.id ? 'Edit club information' : 'Create a club'}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={19} /></button></div>
+    <form className="club-form" onSubmit={(event) => void save(event)}>
+      <label>Club Name<input required minLength={2} value={form.name} onChange={(event) => update('name', event.target.value)} /></label><label>Category<select value={form.category} onChange={(event) => update('category', event.target.value)}>{clubCategories.map((category) => <option key={category}>{category}</option>)}</select></label>
+      <label>Description<textarea required minLength={10} rows={3} value={form.description} onChange={(event) => update('description', event.target.value)} /></label><label>Vision<textarea required minLength={5} rows={2} value={form.vision} onChange={(event) => update('vision', event.target.value)} /></label><label>Mission<textarea required minLength={5} rows={2} value={form.mission} onChange={(event) => update('mission', event.target.value)} /></label>
+      <label>Logo URL<input type="url" value={form.logo} onChange={(event) => update('logo', event.target.value)} placeholder="https://…" /></label><label>Contact Email<input type="email" required value={form.contactEmail} onChange={(event) => update('contactEmail', event.target.value)} /></label><label>Contact Phone<input required value={form.contactPhone} onChange={(event) => update('contactPhone', event.target.value)} /></label>
+      {error && <div className="form-error" role="alert">{error}</div>}{club.id && <p className="field-note">Status: {club.status === 'active' ? 'Active' : club.status === 'pending' ? 'Pending administrator approval' : club.status}. {club.reviewNote ? `Admin note: ${club.reviewNote}` : ''}</p>}<div className="form-actions"><button type="button" className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={busy}>{busy ? 'Saving…' : club.id ? 'Save club details' : 'Submit Club for Approval'}</button></div>
+    </form>
+    {club.id && <section className="club-member-section"><div className="panel-heading"><div><p className="eyebrow">MEMBERSHIP MANAGEMENT</p><h2>Members & requests</h2></div><span>{club.status === 'active' ? `${members.filter((member) => member.status === 'pending').length} pending` : club.status === 'pending' ? 'Awaiting admin approval' : club.status}</span></div>{club.status !== 'active' ? <p className="field-note">Membership requests become available when an administrator approves this club.</p> : members.length ? members.map((member) => <article className="club-member-row" key={member.id}><div><b>{member.studentName}</b><small>{member.registrationNumber || 'No registration number'} · {member.faculty || 'Faculty not provided'}</small><small>Applied {formatDate(member.applicationDate, { year: 'numeric' })}</small></div><span className={`status-pill ${member.status === 'member' ? 'status-on' : member.status === 'rejected' ? 'status-muted' : 'status-draft'}`}>{member.status}</span>{member.status === 'pending' && <div><button className="text-button" onClick={() => void review(member, 'approve')}><Check size={14} /> Approve</button><button className="text-button danger-text" onClick={() => void review(member, 'reject')}><X size={14} /> Reject</button></div>}</article>) : <p className="field-note">No membership requests yet.</p>}</section>}
+    {club.id && club.status === 'active' && <section className="club-member-section"><div className="panel-heading"><div><p className="eyebrow">EVENTS & ATTENDANCE</p><h2>Club events</h2></div><button className="button button-primary button-small" onClick={() => onCreateEvent(club)}><Plus size={14} />Create event</button></div>{clubEvents.length ? clubEvents.map((event) => <article className="club-member-row" key={event.id}><div><b>{event.title}</b><small>{formatDate(event.startAt)} · {event.registeredCount} registered · {event.status}</small><small>Attendance: {event.endAt < new Date().toISOString() ? `${club.attendanceRate}% club rate` : 'Event attendance controls available from details'}</small></div><button className="button button-secondary button-small" onClick={() => onOpenEvent(event)}>Manage event</button></article>) : <p className="field-note">No events linked to this club yet.</p>}</section>}
+    {club.id && <section className="club-report-strip"><div><small>Members</small><b>{club.memberCount}</b></div><div><small>Active events</small><b>{club.activeEvents}</b></div><div><small>Attendance rate</small><b>{club.attendanceRate}%</b></div><div><small>Upcoming</small><b>{club.upcomingEvents}</b></div></section>}
+    {club.id && reports && <section className="club-report-section"><div className="panel-heading"><div><p className="eyebrow">CLUB REPORTS</p><h2>Engagement & growth</h2></div><span>{reports.totals.events} published events · {reports.totals.registrations} registrations · {reports.totals.attendance} check-ins</span></div><div className="club-report-columns"><div><h3>Membership growth</h3>{reports.membershipGrowth.length ? reports.membershipGrowth.map((item) => <div className="club-report-line" key={item.month}><span>{item.month}</span><b>{item.count} joined</b></div>) : <p className="field-note">Approved members will appear here.</p>}</div><div><h3>Most active members</h3>{reports.activeMembers.length ? reports.activeMembers.map((item) => <div className="club-report-line" key={item.name}><span>{item.name}</span><b>{item.attendanceCount} events</b></div>) : <p className="field-note">Attendance activity will appear here.</p>}</div></div><h3>Event registrations & attendance</h3>{reports.eventReports.slice(0, 5).map((item) => <div className="club-report-line" key={item.id}><span>{item.title}</span><b>{item.registrations} registered · {item.attendance} attended</b></div>)}</section>}
+  </div></div>;
+}
+
+function ClubProfilePage({ clubId, onBack, onEventOpen, onMembershipChanged }: { clubId: string; onBack: () => void; onEventOpen: (event: CampusEvent) => void; onMembershipChanged: () => void }) {
+  const [club, setClub] = useState<CampusClub | null>(null); const [events, setEvents] = useState<CampusEvent[]>([]); const [error, setError] = useState('');
+  const refresh = useCallback(async () => { const result = await api<{ club: CampusClub; events: CampusEvent[] }>(`/clubs/${clubId}`); setClub(result.club); setEvents(result.events); }, [clubId]);
+  useEffect(() => { void refresh().catch((reason) => setError(reason.message)); }, [refresh]);
+  const act = async (action: 'join' | 'follow' | 'unfollow') => { try { await api(`/clubs/${clubId}/membership`, { method: 'POST', body: JSON.stringify({ action }) }); await refresh(); onMembershipChanged(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Club action failed.'); } };
+  if (!club) return <div className="page-stack"><button className="back-link" onClick={onBack}><ChevronLeft size={16} /> Back to clubs</button>{error ? <div className="form-error">{error}</div> : <p className="field-note">Loading club…</p>}</div>;
+  return <div className="page-stack"><button className="back-link" onClick={onBack}><ChevronLeft size={16} /> Back to clubs</button><PageTitle eyebrow={club.category.toUpperCase()} title={club.name} description="Meet the community, learn what they do, and find your next campus event." action={<div className="club-profile-actions"><button className="button button-primary" disabled={club.membershipStatus === 'member' || club.membershipStatus === 'pending'} onClick={() => void act('join')}>{club.membershipStatus === 'member' ? 'Member' : club.membershipStatus === 'pending' ? 'Request pending' : 'Join Club'}</button><button className="button button-secondary" onClick={() => void act(club.followed ? 'unfollow' : 'follow')}>{club.followed ? 'Following' : 'Follow Club'}</button></div>} />{error && <div className="form-error">{error}</div>}
+    <div className="club-profile-layout"><section className="panel club-about"><p className="eyebrow">ABOUT</p><h2>What brings this club together</h2><p>{club.description}</p><div className="club-vision-grid"><div><b>Vision</b><p>{club.vision}</p></div><div><b>Mission</b><p>{club.mission}</p></div></div></section><aside className="panel club-leadership"><p className="eyebrow">LEADERSHIP</p><span className="avatar">{initials(club.organizerName)}</span><h2>{club.organizerName}</h2><small>Organizer</small><a href={`mailto:${club.contactEmail}`}>{club.contactEmail}</a><span>{club.contactPhone}</span></aside></div>
+    <section className="club-profile-stats"><div><small>Total Members</small><b>{club.memberCount}</b></div><div><small>Active Events</small><b>{club.activeEvents}</b></div><div><small>Attendance Rate</small><b>{club.attendanceRate}%</b></div><div><small>Upcoming Events</small><b>{club.upcomingEvents}</b></div></section>
+    <section className="section-block"><div className="section-heading"><div><p className="eyebrow">ON THE CALENDAR</p><h2>Upcoming events</h2></div></div>{events.length ? <div className="event-grid">{events.map((event) => <EventCard key={event.id} event={event} onOpen={() => onEventOpen(event)} />)}</div> : <EmptyState icon={<CalendarDays />} title="No upcoming events yet" description="Follow this club to keep up when new events are announced." />}</section>
+  </div>;
+}
+
+type RecurringClubSchedule = { id: string; eventId: string; title: string; clubName: string; faculty: string; roomName: string; roomCode: string; weekdays: number[]; startTime: string; endTime: string; effectiveFrom: string; effectiveUntil: string | null; organizerName: string };
+function WeeklyClubSchedulePage() {
+  const [schedules, setSchedules] = useState<RecurringClubSchedule[]>([]); const [search, setSearch] = useState(''); const [error, setError] = useState('');
+  useEffect(() => { api<{ schedules: RecurringClubSchedule[] }>('/recurring-club-schedules').then((result) => setSchedules(result.schedules)).catch((reason) => setError(reason.message)); }, []);
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const filtered = schedules.filter((schedule) => `${schedule.title} ${schedule.clubName} ${schedule.roomName}`.toLowerCase().includes(search.toLowerCase()));
+  return <div className="page-stack"><PageTitle eyebrow="ORGANIZER WORKSPACE" title="Weekly club schedule" description="See the regular weekly meeting times and rooms reserved for club and society events." /><div className="discover-search"><Search size={19} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search events, clubs, or rooms" aria-label="Search weekly schedules" /></div>{error && <div className="form-error">{error}</div>}{filtered.length ? <div className="weekly-schedule-list">{filtered.map((schedule) => <article className="weekly-schedule-card" key={schedule.id}><div className="weekly-schedule-icon"><CalendarDays size={20} /></div><div className="weekly-schedule-copy"><span className="category-pill blue">{schedule.clubName}</span><h2>{schedule.title}</h2><p>{schedule.weekdays.map((day) => days[day]).join(' · ')} · {schedule.startTime}–{schedule.endTime}</p><small>Regular room: <b>{schedule.roomName} ({schedule.roomCode})</b></small><small>From {schedule.effectiveFrom}{schedule.effectiveUntil ? ` until ${schedule.effectiveUntil}` : ' · ongoing weekly schedule'}</small></div></article>)}</div> : <EmptyState icon={<CalendarDays />} title="No weekly club schedules yet" description="Set weekdays and a regular room while allocating a club event." />}</div>;
+}
+
+function StudentRoomSchedulePage() {
+  const [schedules, setSchedules] = useState<RecurringClubSchedule[]>([]);
+  const [date, setDate] = useState(() => dateKeyInNairobi(new Date()));
+  const [search, setSearch] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => { api<{ schedules: RecurringClubSchedule[] }>('/recurring-club-schedules').then((result) => setSchedules(result.schedules)).catch((reason) => setError(reason.message)); }, []);
+  const weekday = date ? new Date(`${date}T12:00:00Z`).getUTCDay() : -1;
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const filtered = schedules.filter((schedule) => schedule.weekdays.includes(weekday)
+    && date >= schedule.effectiveFrom && (!schedule.effectiveUntil || date <= schedule.effectiveUntil)
+    && `${schedule.title} ${schedule.clubName} ${schedule.roomName} ${schedule.roomCode}`.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => a.startTime.localeCompare(b.startTime) || a.roomName.localeCompare(b.roomName));
+  return <div className="page-stack"><PageTitle eyebrow="CAMPUS ROOM SCHEDULE" title="Daily club activities by room" description="See the recurring club and society activities taking place today, their times, and the rooms they use." />
+    <div className="filter-grid"><label>Choose a day<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label><label>Search activity or room<input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Club, activity, or room" /></label></div>
+    {date && <p className="field-note">Showing {days[weekday]}, {new Intl.DateTimeFormat('en-KE', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Africa/Nairobi' }).format(new Date(`${date}T12:00:00Z`))}.</p>}
+    {error && <div className="form-error" role="alert">{error}</div>}
+    {filtered.length ? <div className="weekly-schedule-list">{filtered.map((schedule) => <article className="weekly-schedule-card" key={schedule.id}><div className="weekly-schedule-icon"><DoorOpen size={20} /></div><div className="weekly-schedule-copy"><span className="category-pill blue">{schedule.clubName}</span><h2>{schedule.title}</h2><p>{schedule.startTime}–{schedule.endTime} · {days[weekday]}</p><small>Room: <b>{schedule.roomName} ({schedule.roomCode})</b></small></div></article>)}</div> : !error && <EmptyState icon={<DoorOpen />} title="No recurring club activities for this day" description="Choose another day or adjust your search to see weekly room bookings." />}
+  </div>;
 }
 
 function AuthDialog({ initialMode, onClose, onSuccess }: {
@@ -370,6 +482,8 @@ function StudentDashboard({ account, events, recommendations, onNavigate, onOpen
   onSave: (eventId: string) => void;
 }) {
   const [todayIso] = useState(() => new Date().toISOString());
+  const todayKey = dateKeyInNairobi(new Date());
+  const todaysEvents = events.filter((event) => dateKeyInNairobi(new Date(event.startAt)) === todayKey && event.status === 'published');
   const upcoming = events.filter((event) => event.currentRegistrationStatus === 'registered').slice(0, 3);
   const latest = events.slice(0, 3);
   return (
@@ -382,6 +496,10 @@ function StudentDashboard({ account, events, recommendations, onNavigate, onOpen
         <StatCard label="Registered events" value={String(upcoming.length).padStart(2, '0')} detail="On your calendar" icon={<CalendarDays />} tone="blue" onClick={() => onNavigate('registered')} />
         <StatCard label="Saved for later" value={String(savedIds.length).padStart(2, '0')} detail="Ideas worth keeping" icon={<Bookmark />} tone="lavender" onClick={() => onNavigate('saved')} />
         <StatCard label="For you" value={String(recommendations.length).padStart(2, '0')} detail="Fresh recommendations" icon={<Sparkles />} tone="amber" onClick={() => onNavigate('recommendations')} />
+      </section>
+      <section className="section-block compact-section">
+        <div className="section-heading"><div><p className="eyebrow">HAPPENING TODAY</p><h2>Events taking place today</h2></div><button className="text-button" onClick={() => onNavigate('events-by-day')}>See events by day <ArrowRight size={15} /></button></div>
+        {todaysEvents.length ? <div className="event-grid">{todaysEvents.map((event) => <EventCard key={event.id} event={event} onOpen={() => onOpen(event)} onRegister={() => onRegister(event)} onSave={() => onSave(event.id)} saved={savedIds.includes(event.id)} />)}</div> : <EmptyState icon={<CalendarDays />} title="No events happening today" description="Check another day to see what’s coming up on campus." action={<button className="button button-secondary" onClick={() => onNavigate('events-by-day')}>Choose a day</button>} />}
       </section>
       <section className="section-block compact-section">
         <div className="section-heading"><div><p className="eyebrow">A LITTLE SOMETHING FOR YOU</p><h2>Picked for your week</h2></div><button className="text-button" onClick={() => onNavigate('recommendations')}>All recommendations <ArrowRight size={15} /></button></div>
@@ -482,20 +600,27 @@ function OrganizerDashboard({ events, onNavigate, onOpen }: {
   );
 }
 
-function DiscoveryPage({ events, onOpen, onRegister, onSave, savedIds }: {
+function DiscoveryPage({ events, recommendations, onOpen, onRegister, onSave, savedIds, dayOnly = false }: {
   events: CampusEvent[];
+  recommendations: Recommendation[];
   onOpen: (event: CampusEvent) => void;
   onRegister: (event: CampusEvent) => void;
   onSave: (eventId: string) => void;
   savedIds: string[];
+  dayOnly?: boolean;
 }) {
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('');
   const [faculty, setFaculty] = useState('');
   const [mode, setMode] = useState('');
   const [venue, setVenue] = useState('');
-  const [date, setDate] = useState('');
+  const [date, setDate] = useState(() => dayOnly ? dateKeyInNairobi(new Date()) : '');
+  const [daySchedules, setDaySchedules] = useState<RecurringClubSchedule[]>([]);
   const faculties = useMemo(() => [...new Set(events.map((event) => event.faculty))].sort(), [events]);
+  useEffect(() => { api<{ schedules: RecurringClubSchedule[] }>('/recurring-club-schedules').then((result) => setDaySchedules(result.schedules)).catch(() => setDaySchedules([])); }, []);
+  const selectedWeekday = date ? new Date(`${date}T12:00:00Z`).getUTCDay() : -1;
+  const recurringOnDate = date ? daySchedules.filter((schedule) => schedule.weekdays.includes(selectedWeekday)
+    && date >= schedule.effectiveFrom && (!schedule.effectiveUntil || date <= schedule.effectiveUntil)) : [];
   const filtered = events.filter((event) => {
     const text = `${event.title} ${event.description} ${event.category} ${event.faculty} ${event.roomName ?? ''}`.toLowerCase();
     return (!search || text.includes(search.toLowerCase()))
@@ -503,14 +628,15 @@ function DiscoveryPage({ events, onOpen, onRegister, onSave, savedIds }: {
       && (!faculty || event.faculty === faculty)
       && (!mode || event.deliveryMode === mode)
       && (!venue || (event.roomName ?? 'Online').toLowerCase().includes(venue.toLowerCase()))
-      && (!date || event.startAt.slice(0, 10) === date);
+      && (!date || dateKeyInNairobi(new Date(event.startAt)) === date);
   });
   const reset = () => { setSearch(''); setCategory(''); setFaculty(''); setMode(''); setVenue(''); setDate(''); };
   return (
     <div className="page-stack">
-      <PageTitle eyebrow="DISCOVER YOUR CAMPUS" title="Find your next thing." description="A workshop, a new idea, a familiar face. It’s all happening somewhere." />
-      <div className="discover-search"><Search size={20} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search events, topics, or people" aria-label="Search events" /><kbd>⌘ K</kbd></div>
-      <section className="filter-panel">
+      <PageTitle eyebrow={dayOnly ? 'CAMPUS DAY VIEW' : 'DISCOVER YOUR CAMPUS'} title={dayOnly ? 'Events by day' : 'Find your next thing.'} description={dayOnly ? 'Choose a date to see events and recurring club sessions happening that day.' : 'A workshop, a new idea, a familiar face. It’s all happening somewhere.'} />
+      {!dayOnly && recommendations.length > 0 && <section className="recommended-strip"><div className="section-heading"><div><p className="eyebrow">BASED ON YOUR INTERESTS, FACULTY & CLUBS</p><h2>Recommended for you</h2></div><Sparkles size={20} /></div><div className="event-grid">{recommendations.slice(0, 3).map((item) => <EventCard key={item.event.id} event={item.event} onOpen={() => onOpen(item.event)} onRegister={() => onRegister(item.event)} onSave={() => onSave(item.event.id)} saved={savedIds.includes(item.event.id)} />)}</div></section>}
+      {!dayOnly && <div className="discover-search"><Search size={20} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search events, topics, or people" aria-label="Search events" /><kbd>⌘ K</kbd></div>}
+      {!dayOnly && <section className="filter-panel">
         <div className="filter-head"><span><Filter size={16} /> Refine your search</span><button className="text-button" onClick={reset}>Clear all</button></div>
         <div className="filter-grid">
           <label>Category<select value={category} onChange={(event) => setCategory(event.target.value)}><option value="">All categories</option>{categories.map((item) => <option key={item}>{item}</option>)}</select></label>
@@ -519,9 +645,11 @@ function DiscoveryPage({ events, onOpen, onRegister, onSave, savedIds }: {
           <label>Event type<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="">All types</option><option value="in_person">In-person</option><option value="online">Online</option><option value="hybrid">Hybrid</option></select></label>
           <label>Venue<input value={venue} onChange={(event) => setVenue(event.target.value)} placeholder="Room or online" /></label>
         </div>
-      </section>
-      <div className="result-heading"><span><b>{filtered.length}</b> {filtered.length === 1 ? 'event' : 'events'} to explore</span><span className="sort-label">Soonest first <ChevronDown size={15} /></span></div>
-      {filtered.length ? <div className="event-grid">{filtered.map((event) => <EventCard key={event.id} event={event} onOpen={() => onOpen(event)} onRegister={() => onRegister(event)} onSave={() => onSave(event.id)} saved={savedIds.includes(event.id)} />)}</div> : <EmptyState icon={<Search />} title="No events found" description="Try a different search or clear some filters." action={<button className="button button-secondary" onClick={reset}>Clear filters</button>} />}
+      </section>}
+      {dayOnly && <label className="day-date-picker">Choose a day<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>}
+      {!dayOnly && <div className="result-heading"><span><b>{filtered.length}</b> {filtered.length === 1 ? 'event' : 'events'} to explore</span><span className="sort-label">Soonest first <ChevronDown size={15} /></span></div>}
+      {date && <section className="day-events-panel"><div className="section-heading"><div><p className="eyebrow">{new Intl.DateTimeFormat('en-KE', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Africa/Nairobi' }).format(new Date(`${date}T12:00:00Z`))}</p><h2>Events happening this day</h2></div><CalendarDays size={20} /></div>{filtered.length || recurringOnDate.length ? <div className="day-events-list">{filtered.map((event) => <button className="day-event-row" key={event.id} onClick={() => onOpen(event)}><span className="day-event-time">{formatTime(event.startAt)}</span><span><b>{event.title}</b><small>{event.clubName ?? (event.eventScope === 'university' ? 'University event' : event.faculty)} · {event.roomName ?? event.venueLabel ?? (event.deliveryMode === 'online' ? 'Online' : 'Venue to be confirmed')}</small></span><ArrowRight size={16} /></button>)}{recurringOnDate.map((schedule) => <article className="day-event-row recurring-day-event" key={`recurring-${schedule.id}`}><span className="day-event-time">{schedule.startTime}</span><span><b>{schedule.title}</b><small>{schedule.clubName} · Weekly · {schedule.roomName} ({schedule.roomCode})</small></span><span className="status-pill status-on">Weekly</span></article>)}</div> : <p className="field-note">No events are scheduled for this day. Choose another date to explore.</p>}</section>}
+      {!dayOnly && (filtered.length ? <div className="event-grid">{filtered.map((event) => <EventCard key={event.id} event={event} onOpen={() => onOpen(event)} onRegister={() => onRegister(event)} onSave={() => onSave(event.id)} saved={savedIds.includes(event.id)} />)}</div> : <EmptyState icon={<Search />} title="No events found" description="Try a different search or clear some filters." action={<button className="button button-secondary" onClick={reset}>Clear filters</button>} />)}
     </div>
   );
 }
@@ -893,12 +1021,13 @@ function ProfilePage({ account, onUpdate }: { account: Account; onUpdate: (patch
   );
 }
 
-function OrganizerEventsPage({ events, onOpen, onNavigate, onPublish, onCancel }: {
+function OrganizerEventsPage({ events, onOpen, onNavigate, onPublish, onCancel, onDelete }: {
   events: CampusEvent[];
   onOpen: (event: CampusEvent) => void;
   onNavigate: (screen: Screen) => void;
   onPublish: (event: CampusEvent) => void;
   onCancel: (event: CampusEvent) => void;
+  onDelete: (event: CampusEvent) => void;
 }) {
   const [filter, setFilter] = useState<'all' | 'published' | 'draft'>('all');
   const visible = events.filter((event) => event.status !== 'cancelled' && (filter === 'all' || event.status === filter));
@@ -906,7 +1035,7 @@ function OrganizerEventsPage({ events, onOpen, onNavigate, onPublish, onCancel }
     <div className="page-stack">
       <PageTitle eyebrow="ORGANIZER WORKSPACE" title="Manage events" description="Keep the campus calendar clear, current, and easy to trust." action={<button className="button button-primary" onClick={() => onNavigate('create')}><Plus size={16} /> Create event</button>} />
       <div className="segmented-control table-tabs"><button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>All events</button><button className={filter === 'published' ? 'active' : ''} onClick={() => setFilter('published')}>Published</button><button className={filter === 'draft' ? 'active' : ''} onClick={() => setFilter('draft')}>Drafts</button></div>
-      {visible.length ? <div className="manage-event-list">{visible.map((event) => <article className="manage-event-row" key={event.id}><div className={`manage-event-mark ${categoryColors[event.category] ?? 'blue'}`}>{categoryIcons[event.category] ?? '✦'}</div><div className="manage-event-copy"><button className="event-title-button" onClick={() => onOpen(event)}>{event.title}</button><span>{formatDate(event.startAt)} · {modeLabels[event.deliveryMode]} · {event.registeredCount} registered · {event.waitlistCount} waiting</span></div><span className={`status-pill status-${event.status}`}>{event.status}</span><div className="manage-event-actions">{event.status === 'draft' && <button className="button button-small button-secondary" onClick={() => onPublish(event)}>Publish</button>}<button className="button button-small button-secondary" onClick={() => onOpen(event)}>Edit</button><button className="icon-button danger-icon" onClick={() => onCancel(event)} aria-label={`Cancel ${event.title}`}><X size={17} /></button></div></article>)}</div> : <EmptyState icon={<CalendarDays />} title="No events in this view" description="Create an event to start building the campus calendar." action={<button className="button button-primary" onClick={() => onNavigate('create')}>Create event</button>} />}
+      {visible.length ? <div className="manage-event-list">{visible.map((event) => <article className="manage-event-row" key={event.id}><div className={`manage-event-mark ${categoryColors[event.category] ?? 'blue'}`}>{categoryIcons[event.category] ?? '✦'}</div><div className="manage-event-copy"><button className="event-title-button" onClick={() => onOpen(event)}>{event.title}</button><span>{formatDate(event.startAt)} · {modeLabels[event.deliveryMode]} · {event.registeredCount} registered · {event.waitlistCount} waiting</span></div><span className={`status-pill status-${event.status}`}>{event.status}</span><div className="manage-event-actions">{event.status === 'draft' && <button className="button button-small button-secondary" onClick={() => onPublish(event)}>Publish</button>}<button className="button button-small button-secondary" onClick={() => onOpen(event)}>Edit</button><button className="icon-button danger-icon" onClick={() => onCancel(event)} aria-label={`Cancel ${event.title}`} title="Cancel event"><X size={17} /></button><button className="icon-button danger-icon" onClick={() => onDelete(event)} aria-label={`Delete ${event.title}`} title="Delete event"><Trash2 size={16} /></button></div></article>)}</div> : <EmptyState icon={<CalendarDays />} title="No events in this view" description="Create an event to start building the campus calendar." action={<button className="button button-primary" onClick={() => onNavigate('create')}>Create event</button>} />}
     </div>
   );
 }
@@ -1022,13 +1151,15 @@ function OrganizerApplicationsPage({ account, canReview, onAccountUpdated }: {
   );
 }
 
-function CreateEventPage({ onSave, editing, onRooms, onPublishReview, onDone, onCancel }: {
+function CreateEventPage({ onSave, editing, onRooms, onPublishReview, onDone, onCancel, organizerClubs = [], initialClubId = '' }: {
   onSave: (payload: Record<string, unknown>) => Promise<CampusEvent>;
   editing: CampusEvent | null;
   onRooms: (event: CampusEvent) => void;
   onPublishReview: (event: CampusEvent) => void;
   onDone: (event: CampusEvent) => void;
   onCancel: () => void;
+  organizerClubs?: CampusClub[];
+  initialClubId?: string;
 }) {
   const initialStart = new Date(Date.now() + 4 * 24 * 60 * 60_000);
   initialStart.setHours(14, 0, 0, 0);
@@ -1037,8 +1168,10 @@ function CreateEventPage({ onSave, editing, onRooms, onPublishReview, onDone, on
     description: editing?.description ?? '',
     category: editing?.category ?? categories[0],
     deliveryMode: editing?.deliveryMode ?? 'in_person',
+    eventScope: editing?.eventScope ?? (initialClubId ? 'club' : editing?.faculty === 'University-wide' ? 'university' : 'faculty'),
     faculty: editing?.faculty ?? '',
     clubName: editing?.clubName ?? '',
+    clubId: editing?.clubId ?? initialClubId,
     startAt: editing ? localDateTime(new Date(editing.startAt)) : localDateTime(initialStart),
     endAt: editing ? localDateTime(new Date(editing.endAt)) : localDateTime(new Date(initialStart.getTime() + 60 * 60_000)),
     registrationClosesAt: editing ? localDateTime(new Date(editing.registrationClosesAt)) : localDateTime(new Date(initialStart.getTime() - 24 * 60 * 60_000)),
@@ -1065,7 +1198,8 @@ function CreateEventPage({ onSave, editing, onRooms, onPublishReview, onDone, on
         registrationClosesAt: new Date(form.registrationClosesAt).toISOString(),
         expectedAttendance: Number(form.expectedAttendance),
         ...(registrationCapacity === '' ? {} : { registrationCapacity: Number(registrationCapacity) }),
-        clubName: form.clubName || null,
+        clubId: form.clubId || null,
+        clubName: form.clubId ? null : form.clubName || null,
         meetingUrl: form.meetingUrl || null,
       };
       const updated = await onSave(payload);
@@ -1091,8 +1225,10 @@ function CreateEventPage({ onSave, editing, onRooms, onPublishReview, onDone, on
         <div className="create-form panel">
           <label>Event name<input required minLength={4} maxLength={120} value={form.title} onChange={(event) => set('title', event.target.value)} placeholder="e.g. Design thinking workshop" /></label>
           <label>About this event<textarea required minLength={20} maxLength={4000} rows={5} value={form.description} onChange={(event) => set('description', event.target.value)} placeholder="What will students learn, see, or do?" /></label>
-          <div className="form-two-col"><label>Faculty or school<input required value={form.faculty} onChange={(event) => set('faculty', event.target.value)} placeholder="e.g. School of Computing" /></label><label>Category<select value={form.category} onChange={(event) => set('category', event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></label></div>
-          <div className="form-two-col"><label>Event type<select value={form.deliveryMode} onChange={(event) => set('deliveryMode', event.target.value)}><option value="in_person">In-person</option><option value="online">Online</option><option value="hybrid">Hybrid</option></select></label><label>Club or community<input value={form.clubName} onChange={(event) => set('clubName', event.target.value)} placeholder="Optional" /></label></div>
+          <div className="form-two-col"><label>Event organized by<select value={form.eventScope} onChange={(event) => { const scope = event.target.value; set('eventScope', scope); if (scope !== 'club') set('clubId', ''); if (scope === 'university') set('faculty', 'University-wide'); else if (form.faculty === 'University-wide') set('faculty', ''); }}><option value="university">University</option><option value="faculty">Faculty</option><option value="club">Club or society</option></select></label><label>Category<select value={form.category} onChange={(event) => set('category', event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></label></div>
+          {form.eventScope === 'faculty' && <label>Faculty or school<input required value={form.faculty} onChange={(event) => set('faculty', event.target.value)} placeholder="e.g. School of Computing" /></label>}
+          {form.eventScope === 'club' && <label>Associated Club<select required aria-label="Associated Club" value={form.clubId} onChange={(event) => set('clubId', event.target.value)}><option value="">Select one of your clubs</option>{organizerClubs.map((club) => <option key={club.id} value={club.id}>{club.name}</option>)}</select>{!organizerClubs.length && <small className="field-note">Create a club first, or choose University or Faculty above.</small>}</label>}
+          <div className="form-two-col"><label>Event type<select value={form.deliveryMode} onChange={(event) => set('deliveryMode', event.target.value)}><option value="in_person">In-person</option><option value="online">Online</option><option value="hybrid">Hybrid</option></select></label><label>{form.eventScope === 'university' ? 'Audience' : 'Event scope'}<input disabled value={form.eventScope === 'university' ? 'Open to the whole university' : form.eventScope === 'faculty' ? `For ${form.faculty || 'the selected faculty'}` : 'For this club community'} /></label></div>
           <div className="form-two-col"><label>Starts<input required type="datetime-local" value={form.startAt} onChange={(event) => set('startAt', event.target.value)} /></label><label>Ends<input required type="datetime-local" value={form.endAt} onChange={(event) => set('endAt', event.target.value)} /></label></div>
           <label>Registration closes<input required type="datetime-local" value={form.registrationClosesAt} onChange={(event) => set('registrationClosesAt', event.target.value)} /><small className="field-note">{ongoing ? 'For an ongoing event, extend this time to reopen registration.' : 'The default is 24 hours before the event starts.'}</small></label>
           <div className="form-two-col"><label>Expected attendance<input required min={1} max={10000} type="number" value={form.expectedAttendance} onChange={(event) => set('expectedAttendance', Number(event.target.value))} /></label><label>Registration capacity<input min={1} max={10000} type="number" value={form.registrationCapacity} onChange={(event) => set('registrationCapacity', event.target.value === '' ? '' : Number(event.target.value))} placeholder={form.deliveryMode === 'online' ? 'Defaults to expected attendance' : 'Defaults to room capacity'} /><small className="field-note">Leave blank to use the room capacity, or expected attendance for Online events.</small></label></div>
@@ -1133,12 +1269,13 @@ function PublishEventPage({ event, onPublish, onEdit }: {
   </div>;
 }
 
-function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflictsOnly }: {
+function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflictsOnly, onSaveRecurring }: {
   events: CampusEvent[];
   selectedId: string;
   onSelectEvent: (eventId: string) => void;
   onConfirmRoom: (eventId: string, roomId: string) => Promise<void>;
   conflictsOnly?: boolean;
+  onSaveRecurring?: (event: CampusEvent, roomId: string, weekdays: number[], startTime: string, endTime: string) => Promise<void>;
 }) {
   const candidates = events.filter((event) => event.status === 'draft' && event.deliveryMode !== 'online');
   const [configured, setConfigured] = useState(false);
@@ -1147,21 +1284,26 @@ function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflicts
   const [attendanceEstimate, setAttendanceEstimate] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [recurringWeekdays, setRecurringWeekdays] = useState<number[]>([]);
+  const [recurringStartTime, setRecurringStartTime] = useState('14:00');
+  const [recurringEndTime, setRecurringEndTime] = useState('15:00');
   const selected = candidates.find((event) => event.id === selectedId) ?? candidates[0];
   useEffect(() => {
     if (!selected) return;
     setLoading(true);
     setError('');
-    api<{ configured: boolean; recommendations: RoomOption[]; attendanceEstimate: number; eventOverlaps: typeof eventOverlaps }>(`/events/${selected.id}/room-options`)
+    const scheduleQuery = recurringWeekdays.length ? `?weekdays=${recurringWeekdays.join(',')}&startTime=${encodeURIComponent(recurringStartTime)}&endTime=${encodeURIComponent(recurringEndTime)}&effectiveFrom=${encodeURIComponent(selected.startAt.slice(0, 10))}` : '';
+    api<{ configured: boolean; recommendations: RoomOption[]; attendanceEstimate: number; eventOverlaps: typeof eventOverlaps }>(`/events/${selected.id}/room-options${scheduleQuery}`)
       .then((result) => { setConfigured(result.configured); setRooms(result.recommendations); setEventOverlaps(result.eventOverlaps); setAttendanceEstimate(result.attendanceEstimate); })
       .catch((reason) => setError(reason instanceof Error ? reason.message : 'Could not load room options.'))
       .finally(() => setLoading(false));
-  }, [selected?.id]);
+  }, [selected?.id, recurringWeekdays, recurringStartTime, recurringEndTime]);
   const eligible = rooms.filter((room) => room.eligible);
   return (
     <div className="page-stack">
       <PageTitle eyebrow={conflictsOnly ? 'SCHEDULE CHECK' : 'SMART ROOM ALLOCATION'} title={conflictsOnly ? 'Conflict detection' : 'Find a room that fits.'} description={conflictsOnly ? 'See room conflicts and suitable alternatives before publishing.' : 'The organizer stays in control. CampusConnect checks availability, capacity, and required facilities.'} />
       {candidates.length > 0 && <label className="event-select-label">Draft event<select value={selected?.id ?? ''} onChange={(event) => onSelectEvent(event.target.value)}>{candidates.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label>}
+      {selected?.eventScope === 'club' && <section className="weekly-schedule-panel panel"><div><p className="eyebrow">OPTIONAL CLUB SCHEDULE</p><h2>Does this event happen weekly?</h2><p className="field-note">Choose one or more weekdays to check room availability for a regular weekly slot.</p></div><div className="weekday-picker">{['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'].map((day, index) => <button type="button" className={recurringWeekdays.includes(index) ? 'selected' : ''} aria-pressed={recurringWeekdays.includes(index)} key={day} onClick={() => setRecurringWeekdays((current) => current.includes(index) ? current.filter((item) => item !== index) : [...current, index].sort())}>{day.slice(0, 3)}</button>)}</div><div className="form-two-col"><label>Regular start time<input type="time" value={recurringStartTime} onChange={(event) => setRecurringStartTime(event.target.value)} /></label><label>Regular end time<input type="time" value={recurringEndTime} onChange={(event) => setRecurringEndTime(event.target.value)} /></label></div>{recurringWeekdays.length > 0 && <small className="field-note">Room suggestions now check weekly conflicts on {recurringWeekdays.map((day) => ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][day]).join(', ')}.</small>}</section>}
       {selected && <div className="allocation-event-summary"><span className="event-summary-icon"><CalendarDays size={19} /></span><div><b>{selected.title}</b><small>{formatDate(selected.startAt)} · {formatTime(selected.startAt)}–{formatTime(selected.endAt)} · Expected {selected.expectedAttendance} · Predicted attendance {attendanceEstimate}</small></div><span className="status-pill status-draft">Draft</span></div>}
       {error && <div className="form-error" role="alert">{error}</div>}
       {!selected ? <EmptyState icon={<DoorOpen />} title="No in-person drafts yet" description="Create an in-person or hybrid event to check room fit." /> : loading ? <div className="loading-panel">Checking verified room inventory…</div> : !configured ? (
@@ -1177,7 +1319,7 @@ function RoomsPage({ events, selectedId, onSelectEvent, onConfirmRoom, conflicts
           <div className="allocation-score-note"><Sparkles size={17} /><span>Eligible rooms meet capacity, facility, and availability requirements. Recommendations balance predicted attendance, room fit, facilities, and schedule.</span></div>
           {eventOverlaps.length > 0 && <div className="conflict-alert"><span><ShieldCheck size={19} /></span><div><strong>Event schedule overlap</strong><p>{eventOverlaps.map((overlap) => `${overlap.eventTitle} (${formatTime(overlap.startAt)}–${formatTime(overlap.endAt)})`).join(' · ')} overlaps this event time.</p></div></div>}
           {conflictsOnly && rooms.some((room) => room.conflict) && <div className="conflict-alert"><span><ShieldCheck size={19} /></span><div><strong>Schedule conflicts found</strong><p>One or more rooms overlap with another booking. Choose an eligible alternative or reschedule.</p></div></div>}
-          <div className="room-table-wrap"><table className="room-table"><thead><tr><th>Room</th><th>Capacity</th><th>Facilities</th><th>Recommendation</th><th>Status</th><th /></tr></thead><tbody>{rooms.map((room) => <tr key={room.roomId} className={room.eligible ? '' : 'room-ineligible'}><td><strong>{room.name}</strong><small>{room.code}</small></td><td>{room.capacity} seats</td><td><div className="facility-pills">{room.facilities.map((item) => <span key={item}>{item}</span>)}</div>{room.missingFacilities.length > 0 && <small className="missing-facility">Missing {room.missingFacilities.join(', ')}</small>}</td><td><strong>{room.recommendationScore}%</strong><small>{room.capacityFitScore}% predicted utilization</small></td><td>{room.conflict ? <span className="status-pill status-error">Conflict</span> : room.eligible ? <span className="status-pill status-on">Available</span> : <span className="status-pill status-muted">Not suitable</span>}</td><td>{room.eligible && <button className="button button-small button-primary" onClick={() => void onConfirmRoom(selected.id, room.roomId)}>Confirm</button>}</td></tr>)}</tbody></table></div>
+      <div className="room-table-wrap"><table className="room-table"><thead><tr><th>Room</th><th>Capacity</th><th>Facilities</th><th>Recommendation</th><th>Status</th><th /></tr></thead><tbody>{rooms.map((room) => <tr key={room.roomId} className={room.eligible ? '' : 'room-ineligible'}><td><strong>{room.name}</strong><small>{room.code}</small></td><td>{room.capacity} seats</td><td><div className="facility-pills">{room.facilities.map((item) => <span key={item}>{item}</span>)}</div>{room.missingFacilities.length > 0 && <small className="missing-facility">Missing {room.missingFacilities.join(', ')}</small>}</td><td><strong>{room.recommendationScore}%</strong><small>{room.capacityFitScore}% predicted utilization</small></td><td>{room.conflict ? <span className="status-pill status-error">Conflict</span> : room.eligible ? <span className="status-pill status-on">Available</span> : <span className="status-pill status-muted">Not suitable</span>}</td><td>{room.eligible && <button className="button button-small button-primary" onClick={() => void onConfirmRoom(selected.id, room.roomId).then(() => { if (selected.eventScope === 'club' && recurringWeekdays.length && onSaveRecurring) return onSaveRecurring(selected, room.roomId, recurringWeekdays, recurringStartTime, recurringEndTime); return undefined; })}>Confirm</button>}</td></tr>)}</tbody></table></div>
           {!eligible.length && <EmptyState icon={<DoorOpen />} title="No suitable room found" description="Review required facilities, expected attendance, or the event time." />}
           {!!eligible.length && selected.roomId && <div className="success-banner"><CheckCircle2 size={18} /> Room allocation confirmed. Review the event and publish when ready.</div>}
         </>
@@ -1329,39 +1471,67 @@ function AdminRoomsPage() {
   </div>;
 }
 
+function AdminClubsPage({ initialStatus = '' }: { initialStatus?: string }) {
+  const [clubs, setClubs] = useState<CampusClub[]>([]); const [status, setStatus] = useState(initialStatus); const [error, setError] = useState(''); const [busyId, setBusyId] = useState(''); const [notes, setNotes] = useState<Record<string, string>>({});
+  const refresh = useCallback(async () => { const result = await api<{ clubs: CampusClub[] }>(`/admin/clubs${status ? `?status=${status}` : ''}`); setClubs(result.clubs); }, [status]);
+  useEffect(() => { void refresh().catch((reason) => setError(reason.message)); }, [refresh]);
+  const review = async (club: CampusClub, decision: 'approve' | 'reject') => { setBusyId(club.id); setError(''); try { await api(`/admin/clubs/${club.id}/review`, { method: 'POST', body: JSON.stringify({ decision, note: notes[club.id] ?? '' }) }); await refresh(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Club review failed.'); } finally { setBusyId(''); } };
+  const setClubStatus = async (club: CampusClub, nextStatus: 'active' | 'suspended') => { setBusyId(club.id); setError(''); try { await api(`/admin/clubs/${club.id}/status`, { method: 'POST', body: JSON.stringify({ status: nextStatus, note: notes[club.id] ?? '' }) }); await refresh(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Club status could not be changed.'); } finally { setBusyId(''); } };
+  const tabs = [['', 'All clubs'], ['pending', 'Pending approval'], ['active', 'Active'], ['rejected', 'Rejected'], ['suspended', 'Suspended']];
+  return <div className="page-stack"><PageTitle eyebrow="ADMINISTRATOR WORKSPACE" title={initialStatus === 'pending' ? 'Club approvals' : 'Clubs & societies'} description="Review submissions, govern club status, and monitor membership and upcoming activity." />
+    <div className="segmented-control table-tabs">{tabs.map(([key, label]) => <button key={key} className={status === key ? 'active' : ''} onClick={() => setStatus(key)}>{label}</button>)}</div>
+    {error && <div className="form-error" role="alert">{error}</div>}
+    {clubs.length ? <div className="admin-club-list">{clubs.map((club) => <article className="admin-club-card" key={club.id}><div className={`club-logo ${categoryColors[club.category] ?? 'blue'}`}>{initials(club.name)}</div><div className="admin-club-main"><div className="admin-club-heading"><div><h2>{club.name}</h2><small>{club.organizerName} · {club.category}</small></div><span className={`status-pill ${club.status === 'active' ? 'status-on' : club.status === 'rejected' || club.status === 'suspended' ? 'status-error' : 'status-draft'}`}>{club.status === 'active' ? 'Active' : club.status === 'pending' ? 'Pending Approval' : club.status}</span></div><p>{club.description}</p><div className="admin-club-metrics"><span>{club.memberCount} members</span><span>{club.upcomingEvents} upcoming events</span><span>{club.attendanceRate}% attendance</span><span>Submitted {club.submittedAt ? formatDate(club.submittedAt, { year: 'numeric' }) : 'Previously active'}</span></div>{club.reviewNote && <small className="field-note">Last admin note: {club.reviewNote}</small>}
+      {club.status === 'pending' && <><label className="admin-review-note">Review note<textarea rows={2} maxLength={500} value={notes[club.id] ?? ''} onChange={(event) => setNotes((current) => ({ ...current, [club.id]: event.target.value }))} placeholder="Optional note for the organizer" /></label><div className="admin-club-actions"><button className="button button-secondary button-small" disabled={busyId === club.id} onClick={() => void review(club, 'reject')}>Reject</button><button className="button button-primary button-small" disabled={busyId === club.id} onClick={() => void review(club, 'approve')}><Check size={14} /> Approve club</button></div></>}
+      {club.status === 'active' && <button className="button button-secondary button-small" disabled={busyId === club.id} onClick={() => void setClubStatus(club, 'suspended')}>Suspend club</button>}
+      {(club.status === 'suspended' || club.status === 'rejected') && <button className="button button-primary button-small" disabled={busyId === club.id} onClick={() => void setClubStatus(club, 'active')}>Reactivate club</button>}
+    </div></article>)}</div> : <EmptyState icon={<Users />} title="No clubs in this view" description={status === 'pending' ? 'New organizer submissions will appear here for approval.' : 'Clubs matching this status will appear here.'} />}
+  </div>;
+}
+
 const studentNav = [
-  { id: 'dashboard' as const, label: 'Home', icon: LayoutDashboard },
-  { id: 'discover' as const, label: 'Discover', icon: Compass },
+  { id: 'dashboard' as const, label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'discover' as const, label: 'Events', icon: Compass },
+  { id: 'events-by-day' as const, label: 'Events by Day', icon: CalendarDays },
+  { id: 'room-schedule' as const, label: 'Daily Room Schedule', icon: DoorOpen },
+  { id: 'clubs' as const, label: 'Clubs & Societies', icon: Users },
   { id: 'calendar' as const, label: 'Calendar', icon: CalendarDays },
-];
-const studentMoreNav = [
-  { id: 'recommendations' as const, label: 'For you', icon: Sparkles },
+  { id: 'registered' as const, label: 'My Registrations', icon: CalendarPlus },
+  { id: 'attendance-history' as const, label: 'Attendance History', icon: CheckCircle2 },
   { id: 'notifications' as const, label: 'Notifications', icon: Bell },
+  { id: 'profile' as const, label: 'Profile', icon: Heart },
+];
+const studentMoreNav: Array<{ id: Screen; label: string; icon: typeof Sparkles }> = [
+  { id: 'recommendations' as const, label: 'For you', icon: Sparkles },
   { id: 'applications' as const, label: 'Apply to organize', icon: Users },
-  { id: 'profile' as const, label: 'Profile & interests', icon: Heart },
 ];
 const organizerNav = [
-  { id: 'dashboard' as const, label: 'Overview', icon: LayoutDashboard },
+  { id: 'dashboard' as const, label: 'Dashboard', icon: LayoutDashboard },
   { id: 'events' as const, label: 'Events', icon: CalendarDays },
-  { id: 'create' as const, label: 'Create', icon: Plus },
-];
-const organizerMoreNav = [
-  { id: 'rooms' as const, label: 'Rooms', icon: DoorOpen },
-  { id: 'conflicts' as const, label: 'Conflicts', icon: ShieldCheck },
-  { id: 'analytics' as const, label: 'Analytics', icon: ArrowUpRight },
+  { id: 'create-club' as const, label: 'Create Club', icon: Plus },
+  { id: 'clubs' as const, label: 'Manage Clubs', icon: Users },
+  { id: 'weekly-schedule' as const, label: 'Weekly Club Schedule', icon: CalendarDays },
+  { id: 'registrations' as const, label: 'Registrations', icon: CalendarPlus },
+  { id: 'attendance-history' as const, label: 'Attendance', icon: CheckCircle2 },
+  { id: 'rooms' as const, label: 'Room Allocation', icon: DoorOpen },
+  { id: 'conflicts' as const, label: 'Conflict Detection', icon: ShieldCheck },
+  { id: 'analytics' as const, label: 'Reports', icon: ArrowUpRight },
   { id: 'notifications' as const, label: 'Notifications', icon: Bell },
   { id: 'profile' as const, label: 'Profile', icon: Heart },
 ];
+const organizerMoreNav: typeof studentMoreNav = [];
 const administratorNav = [
-  { id: 'dashboard' as const, label: 'Overview', icon: LayoutDashboard },
+  { id: 'dashboard' as const, label: 'Dashboard', icon: LayoutDashboard },
   { id: 'admin-users' as const, label: 'Users', icon: Users },
+  { id: 'applications' as const, label: 'Organizer Applications', icon: ShieldCheck },
+  { id: 'club-approvals' as const, label: 'Club Approvals', icon: CheckCircle2 },
+  { id: 'admin-clubs' as const, label: 'Clubs & Societies', icon: Users },
+  { id: 'events' as const, label: 'Events', icon: CalendarDays },
   { id: 'rooms' as const, label: 'Rooms', icon: DoorOpen },
-  { id: 'analytics' as const, label: 'Reports', icon: ArrowUpRight },
+  { id: 'analytics' as const, label: 'Analytics & Reports', icon: ArrowUpRight },
+  { id: 'profile' as const, label: 'Settings', icon: Heart },
 ];
-const administratorMoreNav = [
-  { id: 'applications' as const, label: 'Organizer applications', icon: ShieldCheck },
-  { id: 'profile' as const, label: 'Profile', icon: Heart },
-];
+const administratorMoreNav: typeof studentMoreNav = [];
 
 export default function App() {
   const [account, setAccount] = useState<Account | null>(null);
@@ -1369,6 +1539,10 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('landing');
   const [screenHistory, setScreenHistory] = useState<Screen[]>([]);
   const [events, setEvents] = useState<CampusEvent[]>([]);
+  const [clubs, setClubs] = useState<CampusClub[]>([]);
+  const [clubDialog, setClubDialog] = useState<CampusClub | null>(null);
+  const [clubsRefresh, setClubsRefresh] = useState(0);
+  const [newEventClubId, setNewEventClubId] = useState('');
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [selectedId, setSelectedId] = useState('');
@@ -1394,8 +1568,11 @@ export default function App() {
   const loadData = useCallback(async (current: Account) => {
     const eventResult = await api<{ events: CampusEvent[] }>('/events');
     setEvents(eventResult.events);
+    const clubResult = await api<{ clubs: CampusClub[] }>('/clubs');
+    setClubs(clubResult.clubs);
     const tasks: Promise<void>[] = [
       api<{ notifications: NotificationItem[] }>('/notifications').then((result) => setNotifications(result.notifications)),
+      api<{ clubs: CampusClub[] }>('/clubs').then((result) => setClubs(result.clubs)),
     ];
     if (current.role === 'student') {
       tasks.push(api<{ recommendations: Recommendation[] }>('/recommendations').then((result) => setRecommendations(result.recommendations)));
@@ -1561,6 +1738,18 @@ export default function App() {
     }
   };
 
+  const deleteEvent = async (event: CampusEvent) => {
+    if (!window.confirm(`Permanently delete “${event.title}”? Its registrations, attendance records, and weekly room schedule will also be removed. Current registrants will be notified.`)) return;
+    try {
+      await api(`/events/${event.id}`, { method: 'DELETE' });
+      setEvents((current) => current.filter((item) => item.id !== event.id));
+      setSelectedId((current) => current === event.id ? '' : current);
+      flash('Event deleted. Current registrants were notified.');
+    } catch (reason) {
+      flash(reason instanceof Error ? reason.message : 'The event could not be deleted.');
+    }
+  };
+
   const openEvent = (event: CampusEvent) => {
     setSelectedId(event.id);
     navigate('details');
@@ -1578,6 +1767,11 @@ export default function App() {
     } catch (reason) {
       flash(reason instanceof Error ? reason.message : 'Room allocation failed.');
     }
+  };
+
+  const saveRecurringClubSchedule = async (event: CampusEvent, roomId: string, weekdays: number[], startTime: string, endTime: string) => {
+    await api(`/events/${event.id}/recurring-club-schedule`, { method: 'POST', body: JSON.stringify({ roomId, weekdays, startTime, endTime, effectiveFrom: event.startAt.slice(0, 10), effectiveUntil: null }) });
+    flash('Weekly club schedule saved with the room.');
   };
 
   const updateProfile = async (patch: Record<string, unknown>) => {
@@ -1616,7 +1810,15 @@ export default function App() {
   const content = (() => {
     if (screen === 'details' && activeEvent) return <EventDetails event={activeEvent} account={account} saved={savedIds.includes(activeEvent.id)} organizerWorkspace={organizer} onSave={() => toggleSaved(activeEvent.id)} onRegister={() => void register(activeEvent)} onCancelRegistration={() => void cancelRegistration(activeEvent)} onBack={goBack} onEdit={() => { setSelectedId(activeEvent.id); navigate('create'); }} />;
     if (screen === 'publish') return <PublishEventPage event={selectedEvent} onPublish={(event) => void publishEvent(event)} onEdit={(event) => { setSelectedId(event.id); navigate('create'); }} />;
-    if (screen === 'discover') return <DiscoveryPage events={events} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} savedIds={savedIds} />;
+    if (screen === 'discover') return <DiscoveryPage events={events} recommendations={recommendations} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} savedIds={savedIds} />;
+    if (screen === 'events-by-day') return <DiscoveryPage events={events} recommendations={[]} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} savedIds={savedIds} dayOnly />;
+    if (screen === 'room-schedule' && !organizer && !administrator) return <StudentRoomSchedulePage />;
+    if (screen === 'clubs') return <ClubsPage organizer={organizer} searchEnabled={!organizer} onOpenClub={(club) => { if (organizer) setClubDialog(club); else { setSelectedId(club.id); navigate('club-profile'); } }} refreshKey={clubsRefresh} />;
+    if (screen === 'create-club' && organizer) return <div className="page-stack"><PageTitle eyebrow="ORGANIZER WORKSPACE" title="Create a club or society" description="Submit your club details for administrator approval. It becomes active after approval." action={<button className="button button-primary" onClick={() => setClubDialog({ id: '', name: '', category: clubCategories[0], description: '', vision: '', mission: '', logo: null, contactEmail: '', contactPhone: '', organizerId: account.id, organizerName: account.displayName, memberCount: 0, upcomingEvents: 0, activeEvents: 0, attendanceRate: 0, status: 'pending', submittedAt: null, reviewedAt: null, reviewNote: null, membershipStatus: null, followed: false })}><Plus size={16} /> Create club</button>} /><div className="panel club-approval-note"><ShieldCheck size={20} /><span>New clubs stay pending until an administrator approves them. Only active clubs can recruit members, create events, or set recurring room schedules.</span></div></div>;
+    if (screen === 'admin-clubs' && administrator) return <AdminClubsPage />;
+    if (screen === 'club-approvals' && administrator) return <AdminClubsPage initialStatus="pending" />;
+    if (screen === 'weekly-schedule' && organizer) return <WeeklyClubSchedulePage />;
+    if (screen === 'club-profile') return <ClubProfilePage clubId={selectedId} onBack={() => navigate('clubs')} onEventOpen={openEvent} onMembershipChanged={() => { setClubsRefresh((value) => value + 1); }} />;
     if (screen === 'calendar') return <CalendarPage events={events} onOpen={openEvent} />;
     if (screen === 'registered') return <RegisteredEventsPage events={events} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} savedIds={savedIds} onBack={goBack} />;
     if (screen === 'saved') return <SavedEventsPage events={events} savedIds={savedIds} onOpen={openEvent} onRegister={(event) => void register(event)} onSave={toggleSaved} onDiscover={() => navigate('discover')} />;
@@ -1625,10 +1827,10 @@ export default function App() {
     if (screen === 'applications') return <OrganizerApplicationsPage account={account} canReview={administrator} onAccountUpdated={setAccount} />;
     if (screen === 'admin-users' && administrator) return <AdminUsersPage />;
     if (screen === 'profile') return <ProfilePage account={account} onUpdate={updateProfile} />;
-    if (screen === 'events') return <OrganizerEventsPage events={events} onOpen={openEvent} onNavigate={navigate} onPublish={(event) => void publishEvent(event)} onCancel={(event) => void cancelEvent(event)} />;
-    if (screen === 'create') return <CreateEventPage key={selectedEvent?.id ?? 'new'} editing={selectedEvent} onSave={createOrUpdateEvent} onRooms={(event) => { setSelectedId(event.id); navigate('rooms'); }} onPublishReview={(event) => { setSelectedId(event.id); navigate('publish'); }} onDone={(event) => { setSelectedId(event.id); navigate('details'); }} onCancel={goBack} />;
+    if (screen === 'events') return <OrganizerEventsPage events={events} onOpen={openEvent} onNavigate={navigate} onPublish={(event) => void publishEvent(event)} onCancel={(event) => void cancelEvent(event)} onDelete={(event) => void deleteEvent(event)} />;
+    if (screen === 'create') return <CreateEventPage key={selectedEvent?.id ?? `new-${newEventClubId}`} editing={selectedEvent} organizerClubs={clubs.filter((club) => club.organizerId === account.id && club.status === 'active')} initialClubId={newEventClubId} onSave={createOrUpdateEvent} onRooms={(event) => { setSelectedId(event.id); navigate('rooms'); }} onPublishReview={(event) => { setSelectedId(event.id); navigate('publish'); }} onDone={(event) => { setSelectedId(event.id); navigate('details'); }} onCancel={goBack} />;
     if (screen === 'rooms' && administrator) return <AdminRoomsPage />;
-    if (screen === 'rooms' || screen === 'conflicts') return <RoomsPage events={events} selectedId={selectedId} onSelectEvent={setSelectedId} onConfirmRoom={confirmRoom} conflictsOnly={screen === 'conflicts'} />;
+    if (screen === 'rooms' || screen === 'conflicts') return <RoomsPage events={events} selectedId={selectedId} onSelectEvent={setSelectedId} onConfirmRoom={confirmRoom} onSaveRecurring={saveRecurringClubSchedule} conflictsOnly={screen === 'conflicts'} />;
     if (screen === 'analytics') return <AnalyticsPage />;
     if (administrator) return <AdministratorDashboard onNavigate={navigate} />;
     if (organizer) return <OrganizerDashboard events={events} onNavigate={navigate} onOpen={openEvent} />;
@@ -1642,17 +1844,17 @@ export default function App() {
         <div className="workspace-label">WORKSPACE</div>
         <nav className="side-nav" aria-label="Main navigation">
           {nav.map(({ id, label, icon: Icon }) => <button className={`nav-item ${screen === id || (screen === 'details' && id === (organizer ? 'events' : 'discover')) ? 'active' : ''}`} key={id} onClick={() => navigate(id)}><Icon size={18} /><span>{label}</span></button>)}
-          <button
+          {secondaryNav.length > 0 && <button
             className={`nav-item nav-disclosure ${secondaryNavActive ? 'active' : ''}`}
             onClick={() => setMoreNavOpen((open) => !open)}
             aria-expanded={showSecondaryNav}
             aria-controls="secondary-navigation"
           >
             <MoreHorizontal size={18} /><span>More</span><ChevronDown className={showSecondaryNav ? 'expanded' : ''} size={15} />
-          </button>
-          <div className="nav-subnav" id="secondary-navigation" hidden={!showSecondaryNav}>
+          </button>}
+          {secondaryNav.length > 0 && <div className="nav-subnav" id="secondary-navigation" hidden={!showSecondaryNav}>
             {secondaryNav.map(({ id, label, icon: Icon }) => <button className={`nav-item nav-item-secondary ${screen === id ? 'active' : ''}`} key={id} onClick={() => navigate(id)}><Icon size={17} /><span>{label}</span>{id === 'notifications' && unread > 0 && <small className="nav-count">{unread}</small>}</button>)}
-          </div>
+          </div>}
         </nav>
         <div className="sidebar-spacer" />
         <div className="sidebar-help"><span className="help-mark"><GraduationCap size={18} /></span><b>A little campus magic</b><small>Thoughtful events start with a good plan.</small><button onClick={() => navigate(administrator ? 'analytics' : organizer ? 'analytics' : 'recommendations')}>Explore <ArrowRight size={13} /></button></div>
@@ -1664,6 +1866,7 @@ export default function App() {
         <div className="main-content">
           {error && <div className="inline-error" role="alert">{error}<button onClick={() => setError('')} aria-label="Dismiss error"><X size={15} /></button></div>}
           {content}
+        {clubDialog && organizer && <ClubManageDialog club={clubDialog} onClose={() => setClubDialog(null)} onCreateEvent={(club) => { setNewEventClubId(club.id); setClubDialog(null); navigate('create'); }} onOpenEvent={(event) => { setClubDialog(null); setEvents((items) => items.some((item) => item.id === event.id) ? items : [...items, event]); openEvent(event); }} onSaved={() => { setClubsRefresh((value) => value + 1); void api<{ clubs: CampusClub[] }>('/clubs').then((result) => setClubs(result.clubs)); }} />}
         </div>
         <footer className="app-footer"><span>CampusConnect <i>·</i> University project prototype</span><span>Fictional demo data <i>·</i> English / EAT</span></footer>
       </main>

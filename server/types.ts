@@ -25,6 +25,11 @@ export interface EventRecord {
   deliveryMode: 'in_person' | 'online' | 'hybrid';
   faculty: string;
   clubName: string | null;
+  clubId: string | null;
+  eventScope: 'university' | 'faculty' | 'club';
+  recurringWeekdays: number[];
+  recurringStartTime: string | null;
+  recurringEndTime: string | null;
   startAt: string;
   endAt: string;
   registrationClosesAt: string;

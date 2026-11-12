@@ -56,6 +56,8 @@ db.exec(`
     delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('in_person', 'online', 'hybrid')),
     faculty TEXT NOT NULL,
     club_name TEXT,
+    club_id TEXT REFERENCES clubs(id),
+    event_scope TEXT NOT NULL DEFAULT 'faculty' CHECK (event_scope IN ('university', 'faculty', 'club')),
     start_at TEXT NOT NULL,
     end_at TEXT NOT NULL,
     registration_closes_at TEXT NOT NULL,
@@ -148,7 +150,65 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS organizer_applications_club_status
     ON organizer_applications(club_key, status);
+
+  CREATE TABLE IF NOT EXISTS clubs (
+    id TEXT PRIMARY KEY,
+    organizer_id TEXT NOT NULL REFERENCES accounts(id),
+    name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    description TEXT NOT NULL,
+    vision TEXT NOT NULL,
+    mission TEXT NOT NULL,
+    logo TEXT,
+    contact_email TEXT NOT NULL,
+    contact_phone TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    submitted_at TEXT,
+    reviewed_at TEXT,
+    reviewer_id TEXT REFERENCES accounts(id),
+    review_note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS clubs_organizer ON clubs(organizer_id);
+
+  CREATE TABLE IF NOT EXISTS club_memberships (
+    id TEXT PRIMARY KEY,
+    club_id TEXT NOT NULL REFERENCES clubs(id),
+    account_id TEXT NOT NULL REFERENCES accounts(id),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'member', 'rejected')),
+    followed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (club_id, account_id)
+  );
+  CREATE INDEX IF NOT EXISTS club_memberships_account ON club_memberships(account_id, status, followed);
+
+  CREATE TABLE IF NOT EXISTS recurring_club_schedules (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE UNIQUE,
+    room_id TEXT NOT NULL REFERENCES rooms(id),
+    weekdays TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    effective_from TEXT NOT NULL,
+    effective_until TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS recurring_club_schedules_room ON recurring_club_schedules(room_id);
 `);
+
+const clubColumns = db.pragma('table_info(clubs)') as Array<{ name: string }>;
+if (!clubColumns.some((column) => column.name === 'status')) db.exec("ALTER TABLE clubs ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+if (!clubColumns.some((column) => column.name === 'submitted_at')) db.exec('ALTER TABLE clubs ADD COLUMN submitted_at TEXT');
+if (!clubColumns.some((column) => column.name === 'reviewed_at')) db.exec('ALTER TABLE clubs ADD COLUMN reviewed_at TEXT');
+if (!clubColumns.some((column) => column.name === 'reviewer_id')) db.exec('ALTER TABLE clubs ADD COLUMN reviewer_id TEXT REFERENCES accounts(id)');
+if (!clubColumns.some((column) => column.name === 'review_note')) db.exec('ALTER TABLE clubs ADD COLUMN review_note TEXT');
+
+const clubEventColumns = db.pragma('table_info(events)') as Array<{ name: string }>;
+if (!clubEventColumns.some((column) => column.name === 'club_id')) db.exec('ALTER TABLE events ADD COLUMN club_id TEXT REFERENCES clubs(id)');
+if (!clubEventColumns.some((column) => column.name === 'event_scope')) db.exec("ALTER TABLE events ADD COLUMN event_scope TEXT NOT NULL DEFAULT 'faculty'");
 
 const eventColumns = db.pragma('table_info(events)') as Array<{ name: string }>;
 if (!eventColumns.some((column) => column.name === 'registration_capacity_custom')) {

@@ -145,6 +145,11 @@ function mapEvent(row: Record<string, unknown>, accountId?: string): EventRecord
     deliveryMode: row.delivery_mode as EventRecord['deliveryMode'],
     faculty: String(row.faculty),
     clubName: row.club_name ? String(row.club_name) : null,
+    clubId: row.club_id ? String(row.club_id) : null,
+    eventScope: (row.event_scope ? String(row.event_scope) : row.club_id ? 'club' : row.faculty === 'University-wide' ? 'university' : 'faculty') as EventRecord['eventScope'],
+    recurringWeekdays: row.recurring_weekdays ? parseJson<number[]>(String(row.recurring_weekdays)) : [],
+    recurringStartTime: row.recurring_start_time ? String(row.recurring_start_time) : null,
+    recurringEndTime: row.recurring_end_time ? String(row.recurring_end_time) : null,
     startAt: String(row.start_at),
     endAt: String(row.end_at),
     registrationClosesAt: String(row.registration_closes_at),
@@ -465,6 +470,218 @@ app.post('/api/organizer-applications/:id/review', requireAuth, requireRole('adm
   res.json({ ok: true });
 });
 
+const clubCategories = ['Technology', 'Business', 'Innovation', 'Academic', 'Sports', 'Leadership', 'Arts & Culture', 'Community Service'] as const;
+const clubInputSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  category: z.enum(clubCategories),
+  description: z.string().trim().min(10).max(3000),
+  vision: z.string().trim().min(5).max(1000),
+  mission: z.string().trim().min(5).max(1000),
+  logo: z.string().max(500000).optional().nullable(),
+  contactEmail: z.string().trim().email().max(254),
+  contactPhone: z.string().trim().min(5).max(40),
+});
+
+function mapClub(row: Record<string, unknown>, accountId?: string) {
+  const id = String(row.id);
+  const membership = accountId ? db.prepare('SELECT status, followed FROM club_memberships WHERE club_id = ? AND account_id = ?').get(id, accountId) as { status: string; followed: number } | undefined : undefined;
+  return {
+    id, name: String(row.name), category: String(row.category), description: String(row.description),
+    vision: String(row.vision), mission: String(row.mission), logo: row.logo ? String(row.logo) : null,
+    contactEmail: String(row.contact_email), contactPhone: String(row.contact_phone),
+    status: String(row.status ?? 'active'), submittedAt: row.submitted_at ? String(row.submitted_at) : null,
+    reviewedAt: row.reviewed_at ? String(row.reviewed_at) : null, reviewNote: row.review_note ? String(row.review_note) : null,
+    organizerId: String(row.organizer_id), organizerName: String(row.organizer_name ?? ''),
+    memberCount: Number(row.member_count ?? 0), upcomingEvents: Number(row.upcoming_events ?? 0),
+    activeEvents: Number(row.active_events ?? 0), attendanceRate: Number(row.attendance_rate ?? 0),
+    membershipStatus: membership?.status ?? null, followed: membership?.followed === 1,
+  };
+}
+
+const clubSelect = `SELECT c.*, a.display_name AS organizer_name,
+  (SELECT COUNT(*) FROM club_memberships cm WHERE cm.club_id = c.id AND cm.status = 'member') AS member_count,
+  (SELECT COUNT(*) FROM events e WHERE e.club_id = c.id AND e.status = 'published' AND e.start_at > ?) AS upcoming_events,
+  (SELECT COUNT(*) FROM events e WHERE e.club_id = c.id AND e.status = 'published' AND e.end_at >= ? AND e.start_at <= ?) AS active_events,
+  COALESCE((SELECT ROUND(100.0 * COUNT(ar.id) / NULLIF(COUNT(DISTINCT reg.account_id), 0))
+    FROM events e LEFT JOIN registrations reg ON reg.event_id = e.id AND reg.status = 'registered'
+    LEFT JOIN attendance_records ar ON ar.event_id = e.id
+    WHERE e.club_id = c.id AND e.status = 'published' AND e.end_at < ?), 0) AS attendance_rate
+  FROM clubs c JOIN accounts a ON a.id = c.organizer_id`;
+
+app.get('/api/clubs', (req: AuthenticatedRequest, res) => {
+  const accountId = req.cookies[cookieName] ? (() => {
+    try { const token = jwt.verify(req.cookies[cookieName] as string, jwtSecret); return typeof token === 'string' ? undefined : token.sub; } catch { return undefined; }
+  })() : undefined;
+  const now = new Date().toISOString();
+  let scope = "WHERE c.status = 'active'";
+  let params: unknown[] = [now, now, now, now];
+  if (accountId) {
+    const account = accountById(accountId);
+    if (account?.adminEnabled) scope = '';
+    else if (account?.organizerEnabled || account?.role === 'organizer') { scope = "WHERE (c.status = 'active' OR c.organizer_id = ?)"; params = [...params, accountId]; }
+  }
+  const rows = db.prepare(`${clubSelect} ${scope} ORDER BY c.name COLLATE NOCASE`).all(...params) as Array<Record<string, unknown>>;
+  res.json({ clubs: rows.map((row) => mapClub(row, accountId)) });
+});
+
+app.get('/api/clubs/:id', (req: AuthenticatedRequest, res) => {
+  if (!req.account) { res.status(401).json({ error: 'Sign in to view this club.' }); return; }
+  const now = new Date().toISOString();
+  const row = db.prepare(`${clubSelect} WHERE c.id = ?`).get(now, now, now, now, req.params.id) as Record<string, unknown> | undefined;
+  if (!row || (row.status !== 'active' && row.organizer_id !== req.account?.id && !req.account?.adminEnabled)) { res.status(404).json({ error: 'Club not found.' }); return; }
+  const events = db.prepare(`${eventSelect} WHERE e.club_id = ? AND e.status = 'published' AND EXISTS (SELECT 1 FROM clubs c WHERE c.id = e.club_id AND c.status = 'active') ORDER BY e.start_at`).all(req.params.id) as Array<Record<string, unknown>>;
+  res.json({ club: mapClub(row, req.account?.id), events: events.map((event) => mapEvent(event, req.account?.id)) });
+});
+
+app.post('/api/clubs', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  const parsed = clubInputSchema.safeParse(req.body);
+  if (!parsed.success || !req.account) { res.status(400).json({ error: parsed.success ? 'Check the club details.' : parsed.error.issues[0]?.message }); return; }
+  const id = randomUUID(); const now = new Date().toISOString(); const input = parsed.data;
+  db.prepare(`INSERT INTO clubs (id, organizer_id, name, category, description, vision, mission, logo, contact_email, contact_phone, status, submitted_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`).run(id, req.account.id, input.name, input.category, input.description, input.vision, input.mission, input.logo ?? null, input.contactEmail, input.contactPhone, now, now, now);
+  const row = db.prepare(`${clubSelect} WHERE c.id = ?`).get(now, now, now, now, id) as Record<string, unknown>;
+  res.status(201).json({ club: mapClub(row, req.account.id) });
+});
+
+app.put('/api/clubs/:id', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const existing = db.prepare('SELECT organizer_id, status FROM clubs WHERE id = ?').get(req.params.id) as { organizer_id: string; status: string } | undefined;
+  if (!existing) { res.status(404).json({ error: 'Club not found.' }); return; }
+  if (existing.organizer_id !== req.account.id) { res.status(403).json({ error: 'Only the club organizer can edit it.' }); return; }
+  if (existing.status === 'suspended') { res.status(409).json({ error: 'A suspended club cannot be edited until an administrator reactivates it.' }); return; }
+  const parsed = clubInputSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message }); return; }
+  const input = parsed.data; const now = new Date().toISOString();
+  db.prepare(`UPDATE clubs SET name = ?, category = ?, description = ?, vision = ?, mission = ?, logo = ?, contact_email = ?, contact_phone = ?, updated_at = ? WHERE id = ?`)
+    .run(input.name, input.category, input.description, input.vision, input.mission, input.logo ?? null, input.contactEmail, input.contactPhone, now, req.params.id);
+  const row = db.prepare(`${clubSelect} WHERE c.id = ?`).get(now, now, now, now, req.params.id) as Record<string, unknown>;
+  res.json({ club: mapClub(row, req.account.id) });
+});
+
+app.get('/api/admin/clubs', requireAuth, requireRole('administrator'), (req: AuthenticatedRequest, res) => {
+  const status = typeof req.query.status === 'string' ? req.query.status : '';
+  if (status && !['pending', 'active', 'rejected', 'suspended'].includes(status)) { res.status(400).json({ error: 'Choose a valid club status.' }); return; }
+  const now = new Date().toISOString();
+  const rows = db.prepare(`${clubSelect} ${status ? 'WHERE c.status = ?' : ''} ORDER BY CASE c.status WHEN 'pending' THEN 0 WHEN 'suspended' THEN 1 ELSE 2 END, c.submitted_at DESC, c.name COLLATE NOCASE`)
+    .all(...(status ? [now, now, now, now, status] : [now, now, now, now])) as Array<Record<string, unknown>>;
+  res.json({ clubs: rows.map((row) => mapClub(row)) });
+});
+
+app.post('/api/admin/clubs/:id/review', requireAuth, requireRole('administrator'), (req: AuthenticatedRequest, res) => {
+  const parsed = z.object({ decision: z.enum(['approve', 'reject']), note: z.string().trim().max(500).optional() }).safeParse(req.body);
+  if (!parsed.success || !req.account) { res.status(400).json({ error: parsed.success ? 'Review could not be saved.' : parsed.error.issues[0]?.message }); return; }
+  const club = db.prepare('SELECT organizer_id, name, status FROM clubs WHERE id = ?').get(req.params.id) as { organizer_id: string; name: string; status: string } | undefined;
+  if (!club) { res.status(404).json({ error: 'Club not found.' }); return; }
+  if (club.status !== 'pending') { res.status(409).json({ error: 'Only pending clubs can be reviewed.' }); return; }
+  const status = parsed.data.decision === 'approve' ? 'active' : 'rejected'; const now = new Date().toISOString();
+  db.prepare('UPDATE clubs SET status = ?, reviewed_at = ?, reviewer_id = ?, review_note = ?, updated_at = ? WHERE id = ?').run(status, now, req.account.id, parsed.data.note ?? null, now, req.params.id);
+  createNotification(club.organizer_id, null, 'club_review', `Your club ${club.name} was ${status === 'active' ? 'approved and is now active' : 'rejected'}${parsed.data.note ? `: ${parsed.data.note}` : '.'}`);
+  res.json({ ok: true, status });
+});
+
+app.post('/api/admin/clubs/:id/status', requireAuth, requireRole('administrator'), (req: AuthenticatedRequest, res) => {
+  const parsed = z.object({ status: z.enum(['suspended', 'active']), note: z.string().trim().max(500).optional() }).safeParse(req.body);
+  if (!parsed.success || !req.account) { res.status(400).json({ error: parsed.success ? 'Status could not be changed.' : parsed.error.issues[0]?.message }); return; }
+  const club = db.prepare('SELECT organizer_id, name, status FROM clubs WHERE id = ?').get(req.params.id) as { organizer_id: string; name: string; status: string } | undefined;
+  if (!club) { res.status(404).json({ error: 'Club not found.' }); return; }
+  if (parsed.data.status === 'active' && !['suspended', 'rejected'].includes(club.status)) { res.status(409).json({ error: 'Only suspended or rejected clubs can be reactivated.' }); return; }
+  if (parsed.data.status === 'suspended' && club.status !== 'active') { res.status(409).json({ error: 'Only active clubs can be suspended.' }); return; }
+  const now = new Date().toISOString();
+  db.prepare('UPDATE clubs SET status = ?, reviewed_at = ?, reviewer_id = ?, review_note = ?, updated_at = ? WHERE id = ?').run(parsed.data.status, now, req.account.id, parsed.data.note ?? null, now, req.params.id);
+  createNotification(club.organizer_id, null, 'club_status', `Your club ${club.name} was ${parsed.data.status === 'active' ? 'reactivated' : 'suspended'}${parsed.data.note ? `: ${parsed.data.note}` : '.'}`);
+  res.json({ ok: true, status: parsed.data.status });
+});
+
+app.get('/api/clubs/:id/members', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  const club = db.prepare("SELECT organizer_id FROM clubs WHERE id = ? AND status = 'active'").get(req.params.id) as { organizer_id: string } | undefined;
+  if (!club) { res.status(404).json({ error: 'Club not found.' }); return; }
+  if (club.organizer_id !== req.account?.id) { res.status(403).json({ error: 'Only the club organizer can view membership.' }); return; }
+  const members = db.prepare(`SELECT cm.id, cm.status, cm.created_at AS applicationDate, a.display_name AS studentName,
+    a.registration_no AS registrationNumber, a.faculty FROM club_memberships cm JOIN accounts a ON a.id = cm.account_id
+    WHERE cm.club_id = ? ORDER BY CASE cm.status WHEN 'pending' THEN 0 WHEN 'member' THEN 1 ELSE 2 END, cm.created_at DESC`).all(req.params.id);
+  res.json({ members });
+});
+
+app.get('/api/clubs/:id/events', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  const club = db.prepare("SELECT organizer_id FROM clubs WHERE id = ? AND status = 'active'").get(req.params.id) as { organizer_id: string } | undefined;
+  if (!club) { res.status(404).json({ error: 'Club not found.' }); return; }
+  if (club.organizer_id !== req.account?.id) { res.status(403).json({ error: 'Only the club organizer can view club events.' }); return; }
+  const rows = db.prepare(`SELECT e.*, r.name AS room_name, a.display_name AS organizer_name,
+    (SELECT COUNT(*) FROM registrations reg WHERE reg.event_id = e.id AND reg.status = 'registered') AS registered_count,
+    (SELECT COUNT(*) FROM registrations reg WHERE reg.event_id = e.id AND reg.status = 'waitlisted') AS waitlist_count,
+    rcs.weekdays AS recurring_weekdays, rcs.start_time AS recurring_start_time,
+    rcs.end_time AS recurring_end_time FROM events e LEFT JOIN rooms r ON r.id = e.room_id
+    JOIN accounts a ON a.id = e.organizer_id LEFT JOIN recurring_club_schedules rcs ON rcs.event_id = e.id
+    WHERE e.club_id = ? AND e.organizer_id = ? ORDER BY e.start_at DESC`).all(req.params.id, req.account.id) as Array<Record<string, unknown>>;
+  res.json({ events: rows.map((row) => mapEvent(row, req.account?.id)) });
+});
+
+app.get('/api/recurring-club-schedules', requireAuth, (req: AuthenticatedRequest, res) => {
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const rows = db.prepare(`SELECT rcs.id, rcs.event_id AS eventId, e.title, c.name AS clubName, c.id AS clubId,
+    e.faculty, r.name AS roomName, r.code AS roomCode, rcs.weekdays, rcs.start_time AS startTime,
+    rcs.end_time AS endTime, rcs.effective_from AS effectiveFrom, rcs.effective_until AS effectiveUntil,
+    a.display_name AS organizerName
+    FROM recurring_club_schedules rcs JOIN events e ON e.id = rcs.event_id JOIN clubs c ON c.id = e.club_id
+    JOIN rooms r ON r.id = rcs.room_id JOIN accounts a ON a.id = e.organizer_id
+    WHERE e.status = 'published' AND c.id IS NOT NULL AND c.status = 'active'
+      AND (? = '' OR e.title LIKE ? OR c.name LIKE ? OR r.name LIKE ?)
+    ORDER BY c.name, e.title`).all(query, `%${query}%`, `%${query}%`, `%${query}%`) as Array<Record<string, unknown>>;
+  res.json({ schedules: rows.map((row) => ({ ...row, weekdays: parseJson<number[]>(String(row.weekdays)) })) });
+});
+
+app.get('/api/clubs/:id/reports', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  const club = db.prepare("SELECT organizer_id FROM clubs WHERE id = ? AND status = 'active'").get(req.params.id) as { organizer_id: string } | undefined;
+  if (!club) { res.status(404).json({ error: 'Club not found.' }); return; }
+  if (club.organizer_id !== req.account?.id) { res.status(403).json({ error: 'Only the club organizer can view club reports.' }); return; }
+  const membershipGrowth = db.prepare(`SELECT substr(created_at, 1, 7) AS month, COUNT(*) AS count FROM club_memberships
+    WHERE club_id = ? AND status = 'member' GROUP BY substr(created_at, 1, 7) ORDER BY month`).all(req.params.id);
+  const eventReports = db.prepare(`SELECT e.id, e.title, e.start_at AS startAt,
+    (SELECT COUNT(*) FROM registrations r WHERE r.event_id = e.id AND r.status IN ('registered', 'waitlisted')) AS registrations,
+    (SELECT COUNT(*) FROM attendance_records ar WHERE ar.event_id = e.id) AS attendance
+    FROM events e WHERE e.club_id = ? AND e.organizer_id = ? AND e.status = 'published' ORDER BY registrations DESC, e.start_at DESC`).all(req.params.id, req.account.id);
+  const activeMembers = db.prepare(`SELECT a.display_name AS name, COUNT(DISTINCT ar.event_id) AS attendanceCount
+    FROM club_memberships cm JOIN accounts a ON a.id = cm.account_id
+    LEFT JOIN attendance_records ar ON ar.account_id = a.id
+    LEFT JOIN events e ON e.id = ar.event_id AND e.club_id = cm.club_id
+    WHERE cm.club_id = ? AND cm.status = 'member' GROUP BY a.id ORDER BY attendanceCount DESC, name LIMIT 10`).all(req.params.id);
+  const totals = db.prepare(`SELECT COUNT(DISTINCT e.id) AS events, COUNT(DISTINCT r.id) AS registrations, COUNT(DISTINCT ar.id) AS attendance
+    FROM events e LEFT JOIN registrations r ON r.event_id = e.id AND r.status IN ('registered', 'waitlisted')
+    LEFT JOIN attendance_records ar ON ar.event_id = e.id WHERE e.club_id = ? AND e.organizer_id = ? AND e.status = 'published'`).get(req.params.id, req.account.id);
+  res.json({ membershipGrowth, eventReports, activeMembers, totals });
+});
+
+app.post('/api/clubs/:id/membership', requireAuth, requireRole('student'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const club = db.prepare("SELECT id FROM clubs WHERE id = ? AND status = 'active'").get(req.params.id);
+  if (!club) { res.status(404).json({ error: 'Club not found.' }); return; }
+  const parsed = z.object({ action: z.enum(['join', 'follow', 'unfollow']) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Choose a valid club action.' }); return; }
+  const existing = db.prepare('SELECT id, status, followed FROM club_memberships WHERE club_id = ? AND account_id = ?').get(req.params.id, req.account.id) as { id: string; status: string; followed: number } | undefined;
+  const now = new Date().toISOString();
+  if (parsed.data.action === 'join') {
+    if (existing?.status === 'member' || existing?.status === 'pending') { res.status(409).json({ error: existing.status === 'member' ? 'You are already a member.' : 'Your request is awaiting approval.' }); return; }
+    if (existing) db.prepare("UPDATE club_memberships SET status = 'pending', updated_at = ? WHERE id = ?").run(now, existing.id);
+    else db.prepare("INSERT INTO club_memberships (id, club_id, account_id, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)").run(randomUUID(), req.params.id, req.account.id, now, now);
+  } else {
+    if (existing) db.prepare('UPDATE club_memberships SET followed = ?, updated_at = ? WHERE id = ?').run(Number(parsed.data.action === 'follow'), now, existing.id);
+    else db.prepare("INSERT INTO club_memberships (id, club_id, account_id, status, followed, created_at, updated_at) VALUES (?, ?, ?, 'rejected', ?, ?, ?)").run(randomUUID(), req.params.id, req.account.id, Number(parsed.data.action === 'follow'), now, now);
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/clubs/:id/membership/:membershipId/review', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  const club = db.prepare("SELECT organizer_id FROM clubs WHERE id = ? AND status = 'active'").get(req.params.id) as { organizer_id: string } | undefined;
+  if (!club) { res.status(404).json({ error: 'Club not found.' }); return; }
+  if (club.organizer_id !== req.account?.id) { res.status(403).json({ error: 'Only the club organizer can review requests.' }); return; }
+  const parsed = z.object({ decision: z.enum(['approve', 'reject']) }).safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: 'Choose approve or reject.' }); return; }
+  const status = parsed.data.decision === 'approve' ? 'member' : 'rejected';
+  const updated = db.prepare("UPDATE club_memberships SET status = ?, updated_at = ? WHERE id = ? AND club_id = ? AND status = 'pending'").run(status, new Date().toISOString(), req.params.membershipId, req.params.id);
+  if (!updated.changes) { res.status(404).json({ error: 'Membership request not found.' }); return; }
+  res.json({ ok: true });
+});
+
 app.get('/api/events', (req: AuthenticatedRequest, res) => {
   const accountId = req.cookies[cookieName]
     ? (() => {
@@ -487,6 +704,7 @@ app.get('/api/events', (req: AuthenticatedRequest, res) => {
   let sql = `${eventSelect} WHERE e.status = 'published'`;
   const values: Array<string> = [];
   if (isOrganizer) sql = `${eventSelect} WHERE e.status IN ('published', 'draft')`;
+  else sql += " AND (e.club_id IS NULL OR EXISTS (SELECT 1 FROM clubs c WHERE c.id = e.club_id AND c.status = 'active'))";
   if (query) {
     sql += ' AND (e.title LIKE ? OR e.description LIKE ? OR e.faculty LIKE ? OR e.category LIKE ?)';
     values.push(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);
@@ -522,6 +740,7 @@ app.get('/api/events/:id', (req, res) => {
     res.status(404).json({ error: 'Event not found.' });
     return;
   }
+  if (row.club_id && row.status === 'published' && !db.prepare("SELECT 1 FROM clubs WHERE id = ? AND status = 'active'").get(row.club_id)) { res.status(404).json({ error: 'Event not found.' }); return; }
   if (row.status !== 'published') {
     const token = req.cookies[cookieName] as string | undefined;
     let account: Account | undefined;
@@ -547,7 +766,9 @@ const eventInputSchema = z.object({
   category: z.string().trim().min(2).max(80),
   deliveryMode: z.enum(['in_person', 'online', 'hybrid']),
   faculty: z.string().trim().min(2).max(120),
+  eventScope: z.enum(['university', 'faculty', 'club']).optional(),
   clubName: z.string().trim().max(100).optional().nullable(),
+  clubId: z.string().uuid().optional().nullable(),
   startAt: z.string().datetime(),
   endAt: z.string().datetime(),
   registrationClosesAt: z.string().datetime().optional(),
@@ -564,6 +785,12 @@ function validateEventInput(body: unknown, res: Response): z.infer<typeof eventI
     return undefined;
   }
   const input = result.data;
+  input.eventScope = input.eventScope ?? (input.clubId ? 'club' : input.faculty === 'University-wide' ? 'university' : 'faculty');
+  if (input.eventScope === 'club' && !input.clubId && !input.clubName) {
+    res.status(400).json({ error: 'Choose an associated club for a club event.' });
+    return undefined;
+  }
+  if (input.eventScope === 'university') input.faculty = 'University-wide';
   if (Date.parse(input.endAt) <= Date.parse(input.startAt)) {
     res.status(400).json({ error: 'The event end time must be after its start time.' });
     return undefined;
@@ -582,16 +809,22 @@ app.post('/api/events', requireAuth, requireRole('organizer'), (req: Authenticat
     return;
   }
   const defaultClose = new Date(Date.parse(input.startAt) - 24 * 60 * 60_000).toISOString();
+  let selectedClub = input.clubId ? db.prepare('SELECT id, name, organizer_id, status FROM clubs WHERE id = ?').get(input.clubId) as { id: string; name: string; organizer_id: string; status: string } | undefined : undefined;
+  if (!input.clubId && input.clubName) {
+    const legacyClub = db.prepare("SELECT id FROM clubs WHERE name = ? COLLATE NOCASE AND organizer_id = ? AND status = 'active'").get(input.clubName, req.account.id) as { id: string } | undefined;
+    if (legacyClub) { input.clubId = legacyClub.id; selectedClub = db.prepare('SELECT id, name, organizer_id, status FROM clubs WHERE id = ?').get(legacyClub.id) as typeof selectedClub; }
+  }
+  if (input.eventScope === 'club' && (!selectedClub || selectedClub.organizer_id !== req.account.id || selectedClub.status !== 'active')) { res.status(400).json({ error: 'Choose one of your active clubs. Clubs need administrator approval before organizing events.' }); return; }
   const id = randomUUID();
   const nowIso = new Date().toISOString();
   db.prepare(`
     INSERT INTO events
-      (id, title, description, category, delivery_mode, faculty, club_name, start_at, end_at,
+      (id, title, description, category, delivery_mode, faculty, club_name, club_id, event_scope, start_at, end_at,
        registration_closes_at, expected_attendance, registration_capacity, required_facilities,
        registration_capacity_custom, meeting_url, status, organizer_id, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
   `).run(
-    id, input.title, input.description, input.category, input.deliveryMode, input.faculty, input.clubName ?? null,
+    id, input.title, input.description, input.category, input.deliveryMode, input.faculty, selectedClub?.name ?? input.clubName ?? null, selectedClub?.id ?? null, input.eventScope,
     input.startAt, input.endAt, input.registrationClosesAt ?? defaultClose, input.expectedAttendance,
     input.registrationCapacity ?? input.expectedAttendance,
     JSON.stringify(input.requiredFacilities),
@@ -616,6 +849,12 @@ app.put('/api/events/:id', requireAuth, requireRole('organizer'), (req: Authenti
   }
   const input = validateEventInput(req.body, res);
   if (!input) return;
+  let selectedClub = input.clubId ? db.prepare('SELECT id, name, organizer_id, status FROM clubs WHERE id = ?').get(input.clubId) as { id: string; name: string; organizer_id: string; status: string } | undefined : undefined;
+  if (!input.clubId && input.clubName) {
+    const legacyClub = db.prepare("SELECT id FROM clubs WHERE name = ? COLLATE NOCASE AND organizer_id = ? AND status = 'active'").get(input.clubName, req.account.id) as { id: string } | undefined;
+    if (legacyClub) { input.clubId = legacyClub.id; selectedClub = db.prepare('SELECT id, name, organizer_id, status FROM clubs WHERE id = ?').get(legacyClub.id) as typeof selectedClub; }
+  }
+  if (input.eventScope === 'club' && (!selectedClub || selectedClub.organizer_id !== req.account.id || selectedClub.status !== 'active')) { res.status(400).json({ error: 'Choose one of your active clubs. Clubs need administrator approval before organizing events.' }); return; }
   const now = Date.now();
   const eventStart = Date.parse(String(previous.start_at));
   const eventEnd = Date.parse(String(previous.end_at));
@@ -703,12 +942,12 @@ app.put('/api/events/:id', requireAuth, requireRole('organizer'), (req: Authenti
   }
   const nextRoomId = input.deliveryMode === 'online' ? null : previous.room_id;
   db.prepare(`
-    UPDATE events SET title = ?, description = ?, category = ?, delivery_mode = ?, faculty = ?, club_name = ?,
+    UPDATE events SET title = ?, description = ?, category = ?, delivery_mode = ?, faculty = ?, club_name = ?, club_id = ?, event_scope = ?,
       start_at = ?, end_at = ?, registration_closes_at = ?, expected_attendance = ?, registration_capacity = ?,
       registration_capacity_custom = ?, required_facilities = ?, meeting_url = ?, room_id = ?, updated_at = ?
     WHERE id = ?
   `).run(
-    input.title, input.description, input.category, input.deliveryMode, input.faculty, input.clubName ?? null,
+    input.title, input.description, input.category, input.deliveryMode, input.faculty, selectedClub?.name ?? input.clubName ?? null, selectedClub?.id ?? null, input.eventScope,
     input.startAt, input.endAt,
     input.registrationClosesAt ?? new Date(Date.parse(input.startAt) - 24 * 60 * 60_000).toISOString(),
     input.expectedAttendance, registrationCapacity,
@@ -736,6 +975,7 @@ app.post('/api/events/:id/publish', requireAuth, requireRole('organizer'), (req,
     res.status(404).json({ error: 'Draft event not found.' });
     return;
   }
+  if (row.club_id && !db.prepare("SELECT 1 FROM clubs WHERE id = ? AND status = 'active'").get(row.club_id)) { res.status(409).json({ error: 'This club is not active. An administrator must approve or reactivate it before publishing.' }); return; }
   if (row.delivery_mode === 'online' && !row.meeting_url) {
     res.status(400).json({ error: 'Add a meeting link before publishing an Online event.' });
     return;
@@ -764,20 +1004,41 @@ app.post('/api/events/:id/publish', requireAuth, requireRole('organizer'), (req,
   res.json({ ok: true });
 });
 
-app.post('/api/events/:id/cancel', requireAuth, requireRole('organizer'), (req, res) => {
-  const update = db.prepare(`
-    UPDATE events SET status = 'cancelled', room_id = NULL, updated_at = ?
-    WHERE id = ? AND status != 'cancelled'
-  `).run(new Date().toISOString(), req.params.id);
-  if (update.changes !== 1) {
-    res.status(404).json({ error: 'Event not found or already cancelled.' });
-    return;
-  }
-  notifyEventRegistrants(String(req.params.id), 'event_changes', 'This event was cancelled. Your registration has been cancelled.');
-  db.prepare(`
-    UPDATE registrations SET status = 'cancelled', updated_at = ?
-    WHERE event_id = ? AND status IN ('registered', 'waitlisted')
-  `).run(new Date().toISOString(), req.params.id);
+app.post('/api/events/:id/cancel', requireAuth, requireRole('organizer', 'administrator'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const event = db.prepare('SELECT organizer_id, status FROM events WHERE id = ?').get(req.params.id) as { organizer_id: string; status: string } | undefined;
+  if (!event || event.status === 'cancelled') { res.status(404).json({ error: 'Event not found or already cancelled.' }); return; }
+  if (!req.account.adminEnabled && event.organizer_id !== req.account.id) { res.status(403).json({ error: 'Organizers can only cancel their own events.' }); return; }
+  const now = new Date().toISOString();
+  const cancel = db.transaction(() => {
+    db.prepare("UPDATE events SET status = 'cancelled', room_id = NULL, updated_at = ? WHERE id = ?").run(now, req.params.id);
+    notifyEventRegistrants(String(req.params.id), 'event_changes', 'This event was cancelled. Your registration has been cancelled.');
+    db.prepare("UPDATE registrations SET status = 'cancelled', updated_at = ? WHERE event_id = ? AND status IN ('registered', 'waitlisted')").run(now, req.params.id);
+  });
+  cancel();
+  res.json({ ok: true });
+});
+
+app.delete('/api/events/:id', requireAuth, requireRole('organizer', 'administrator'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const event = db.prepare('SELECT id, title, organizer_id, status FROM events WHERE id = ?').get(req.params.id) as { id: string; title: string; organizer_id: string; status: string } | undefined;
+  if (!event) { res.status(404).json({ error: 'Event not found.' }); return; }
+  if (!req.account.adminEnabled && event.organizer_id !== req.account.id) { res.status(403).json({ error: 'Organizers can only delete their own events.' }); return; }
+  const registrants = db.prepare("SELECT DISTINCT account_id FROM registrations WHERE event_id = ? AND status IN ('registered', 'waitlisted')").all(event.id) as Array<{ account_id: string }>;
+  const removeEvent = db.transaction(() => {
+    for (const registrant of registrants) {
+      createNotification(registrant.account_id, null, 'event_changes', `The event ${event.title} was deleted by its organizer.`);
+    }
+    db.prepare('DELETE FROM notification_markers WHERE event_id = ?').run(event.id);
+    db.prepare('UPDATE notifications SET event_id = NULL WHERE event_id = ?').run(event.id);
+    db.prepare('DELETE FROM attendance_records WHERE event_id = ?').run(event.id);
+    db.prepare('DELETE FROM attendance_history WHERE event_id = ?').run(event.id);
+    db.prepare('DELETE FROM attendance_sessions WHERE event_id = ?').run(event.id);
+    db.prepare('DELETE FROM recurring_club_schedules WHERE event_id = ?').run(event.id);
+    db.prepare('DELETE FROM registrations WHERE event_id = ?').run(event.id);
+    db.prepare('DELETE FROM events WHERE id = ?').run(event.id);
+  });
+  try { removeEvent(); } catch { res.status(409).json({ error: 'This event still has linked records and could not be deleted.' }); return; }
   res.json({ ok: true });
 });
 
@@ -788,6 +1049,7 @@ app.post('/api/events/:id/register', requireAuth, requireRole('student'), (req: 
     res.status(404).json({ error: 'Event is not available for registration.' });
     return;
   }
+  if (event.club_id && !db.prepare("SELECT 1 FROM clubs WHERE id = ? AND status = 'active'").get(event.club_id)) { res.status(404).json({ error: 'This club event is no longer available.' }); return; }
   if (Date.now() >= Date.parse(String(event.registration_closes_at))) {
     res.status(409).json({ error: 'Registration for this event has closed.' });
     return;
@@ -1213,6 +1475,10 @@ app.get('/api/events/:id/room-options', requireAuth, requireRole('organizer'), (
   const required = parseJson<string[]>(String(event.required_facilities));
   const start = Date.parse(String(event.start_at));
   const end = Date.parse(String(event.end_at));
+  const candidateWeekdays = Array.isArray(req.query.weekdays) ? (req.query.weekdays as string[]).map(Number) : typeof req.query.weekdays === 'string' ? req.query.weekdays.split(',').map(Number).filter(Number.isInteger) : [];
+  const candidateStartTime = typeof req.query.startTime === 'string' ? req.query.startTime : '';
+  const candidateEndTime = typeof req.query.endTime === 'string' ? req.query.endTime : '';
+  const candidateEffectiveFrom = typeof req.query.effectiveFrom === 'string' ? req.query.effectiveFrom : String(event.start_at).slice(0, 10);
   const attendanceEstimate = attendanceForecast(String(event.category), 0, Number(event.expected_attendance), Number(event.registration_capacity)).estimate;
   const eventOverlaps = db.prepare(`
     SELECT id AS eventId, title AS eventTitle, start_at AS startAt, end_at AS endAt, room_id AS roomId
@@ -1235,12 +1501,27 @@ app.get('/api/events/:id/room-options', requireAuth, requireRole('organizer'), (
       start < Date.parse(booking.end_at) + Math.max(room.buffer_minutes, booking.buffer_minutes) * 60_000
         && end + Math.max(room.buffer_minutes, booking.buffer_minutes) * 60_000 > Date.parse(booking.start_at),
     );
+    const recurringConflicts = candidateWeekdays.length && candidateStartTime && candidateEndTime
+      ? db.prepare("SELECT rcs.weekdays, rcs.start_time, rcs.end_time, rcs.effective_from, rcs.effective_until, e.title FROM recurring_club_schedules rcs JOIN events e ON e.id = rcs.event_id JOIN clubs c ON c.id = e.club_id WHERE rcs.room_id = ? AND rcs.event_id != ? AND e.status != 'cancelled' AND c.status = 'active'").all(room.id, req.params.id) as Array<{ weekdays: string; start_time: string; end_time: string; effective_from: string; effective_until: string | null; title: string }>
+      : [];
+    const recurringConflict = recurringConflicts.find((schedule) => {
+      const weekdays = parseJson<number[]>(schedule.weekdays);
+      return candidateEffectiveFrom >= schedule.effective_from && (!schedule.effective_until || candidateEffectiveFrom <= schedule.effective_until)
+        && candidateWeekdays.some((day) => weekdays.includes(day)) && candidateStartTime < schedule.end_time && candidateEndTime > schedule.start_time;
+    });
+    const selectedSchedule = db.prepare('SELECT weekdays, start_time, end_time FROM recurring_club_schedules WHERE room_id = ? AND event_id != ?').all(room.id, req.params.id) as Array<{ weekdays: string; start_time: string; end_time: string }>;
+    const selectedScheduleConflict = selectedSchedule.find((schedule) => {
+      const days = parseJson<number[]>(schedule.weekdays);
+      const weekday = new Date(String(event.start_at)).getDay();
+      return days.includes(weekday) && String(event.start_at).slice(11, 16) < schedule.end_time && String(event.end_at).slice(11, 16) > schedule.start_time;
+    });
+    const fullConflict = conflict ?? (recurringConflict ? { id: 'recurring', title: recurringConflict.title, start_at: String(event.start_at), end_at: String(event.end_at) } : selectedScheduleConflict ? { id: 'recurring', title: 'Recurring club event', start_at: String(event.start_at), end_at: String(event.end_at) } : undefined);
     const neededCapacity = Math.max(Number(event.expected_attendance), Number(event.registration_capacity));
-    const eligible = room.capacity >= neededCapacity && missing.length === 0 && !conflict;
+    const eligible = room.capacity >= neededCapacity && missing.length === 0 && !fullConflict;
     const utilization = attendanceEstimate / room.capacity;
     const capacityScore = Math.max(0, 100 - Math.abs(utilization - 0.72) * 100);
     const facilityScore = required.length ? Math.min(100, 82 + Math.max(0, facilities.length - required.length) * 4) : 82;
-    const availabilityScore = conflict ? 0 : 100;
+    const availabilityScore = fullConflict ? 0 : 100;
     const recommendationScore = Math.round(capacityScore * 0.55 + facilityScore * 0.25 + availabilityScore * 0.2);
     return {
       roomId: room.id,
@@ -1252,12 +1533,12 @@ app.get('/api/events/:id/room-options', requireAuth, requireRole('organizer'), (
       attendanceEstimate,
       capacityFitScore: Math.round(utilization * 100),
       recommendationScore,
-      conflict: conflict ? { eventId: conflict.id, eventTitle: conflict.title, startAt: conflict.start_at, endAt: conflict.end_at } : null,
+      conflict: fullConflict ? { eventId: fullConflict.id, eventTitle: fullConflict.title, startAt: fullConflict.start_at, endAt: fullConflict.end_at } : null,
       eligible,
       reasons: [
         room.capacity >= neededCapacity ? `Fits ${neededCapacity} seats` : `Needs ${neededCapacity} seats`,
         missing.length ? `Missing: ${missing.join(', ')}` : 'Required facilities available',
-        conflict ? `Conflicts with ${conflict.title}` : 'Available at this time',
+        fullConflict ? `Conflicts with ${fullConflict.title}` : 'Available at this time',
         `${recommendationScore}% overall fit`,
       ],
     };
@@ -1289,6 +1570,7 @@ app.post('/api/events/:id/room', requireAuth, requireRole('organizer'), (req: Au
     res.status(403).json({ error: 'Only this event’s organizer can confirm its room.' });
     return;
   }
+  if (event.club_id && !db.prepare("SELECT 1 FROM clubs WHERE id = ? AND status = 'active'").get(event.club_id)) { res.status(409).json({ error: 'This club is not active. An administrator must reactivate it before room allocation.' }); return; }
   const required = parseJson<string[]>(String(event.required_facilities));
   const availableFacilities = parseJson<string[]>(room.facilities);
   if (room.capacity < Number(event.expected_attendance) || required.some((item) => !availableFacilities.includes(item))) {
@@ -1326,6 +1608,48 @@ app.post('/api/events/:id/room', requireAuth, requireRole('organizer'), (req: Au
   res.json({ ok: true });
 });
 
+const recurringScheduleSchema = z.object({
+  roomId: z.string().uuid(),
+  weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+  startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  effectiveUntil: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().nullable(),
+});
+
+app.post('/api/events/:id/recurring-club-schedule', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const event = db.prepare("SELECT e.* FROM events e JOIN clubs c ON c.id = e.club_id WHERE e.id = ? AND e.status != 'cancelled' AND c.status = 'active'").get(req.params.id) as Record<string, unknown> | undefined;
+  if (!event) { res.status(404).json({ error: 'A club event is required for a recurring schedule.' }); return; }
+  if (event.organizer_id !== req.account.id) { res.status(403).json({ error: 'Only this event’s organizer can manage its recurring schedule.' }); return; }
+  const parsed = recurringScheduleSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Check the weekly schedule details.' }); return; }
+  const input = parsed.data;
+  if (input.startTime >= input.endTime || (input.effectiveUntil && input.effectiveUntil < input.effectiveFrom)) { res.status(400).json({ error: 'Check the weekly schedule time range and dates.' }); return; }
+  const room = db.prepare('SELECT id, capacity, facilities FROM rooms WHERE id = ? AND verified = 1').get(input.roomId) as { id: string; capacity: number; facilities: string } | undefined;
+  if (!room) { res.status(404).json({ error: 'Choose a verified room.' }); return; }
+  if (room.capacity < Number(event.expected_attendance) || parseJson<string[]>(String(event.required_facilities)).some((item) => !parseJson<string[]>(room.facilities).includes(item))) { res.status(409).json({ error: 'The room does not meet the club event capacity and facility requirements.' }); return; }
+  const otherSchedules = db.prepare(`SELECT rcs.weekdays, rcs.start_time, rcs.end_time, e.title FROM recurring_club_schedules rcs
+    JOIN events e ON e.id = rcs.event_id WHERE rcs.room_id = ? AND rcs.event_id != ? AND e.status != 'cancelled'`).all(room.id, req.params.id) as Array<{ weekdays: string; start_time: string; end_time: string; title: string }>;
+  const collision = otherSchedules.find((schedule) => input.weekdays.some((day) => parseJson<number[]>(schedule.weekdays).includes(day)) && input.startTime < schedule.end_time && input.endTime > schedule.start_time);
+  if (collision) { res.status(409).json({ error: `This room already has a recurring booking for ${collision.title} during that time.` }); return; }
+  const id = randomUUID(); const now = new Date().toISOString();
+  db.prepare(`INSERT INTO recurring_club_schedules (id, event_id, room_id, weekdays, start_time, end_time, effective_from, effective_until, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO UPDATE SET room_id = excluded.room_id, weekdays = excluded.weekdays,
+      start_time = excluded.start_time, end_time = excluded.end_time, effective_from = excluded.effective_from,
+      effective_until = excluded.effective_until, updated_at = excluded.updated_at`).run(id, req.params.id, room.id, JSON.stringify([...new Set(input.weekdays)].sort()), input.startTime, input.endTime, input.effectiveFrom, input.effectiveUntil ?? null, now, now);
+  res.json({ ok: true });
+});
+
+app.delete('/api/events/:id/recurring-club-schedule', requireAuth, requireRole('organizer'), (req: AuthenticatedRequest, res) => {
+  if (!req.account) return;
+  const event = db.prepare('SELECT organizer_id FROM events WHERE id = ? AND club_id IS NOT NULL').get(req.params.id) as { organizer_id: string } | undefined;
+  if (!event) { res.status(404).json({ error: 'Club event not found.' }); return; }
+  if (event.organizer_id !== req.account.id) { res.status(403).json({ error: 'Only this event’s organizer can remove its schedule.' }); return; }
+  db.prepare('DELETE FROM recurring_club_schedules WHERE event_id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
 app.get('/api/recommendations', requireAuth, requireRole('student'), (req: AuthenticatedRequest, res) => {
   if (!req.account) return;
   const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get(req.account.id) as AccountRow;
@@ -1345,12 +1669,19 @@ app.get('/api/recommendations', requireAuth, requireRole('student'), (req: Authe
   `).all(new Date().toISOString(), req.account.id) as Array<Record<string, unknown>>;
   const interests = parseJson<string[]>(account.interests);
   const clubs = parseJson<string[]>(account.clubs);
+  const clubSignals = db.prepare(`SELECT c.name FROM club_memberships cm JOIN clubs c ON c.id = cm.club_id
+    WHERE cm.account_id = ? AND (cm.status = 'member' OR cm.followed = 1)`).all(req.account.id) as Array<{ name: string }>;
+  const clubNames = new Set([...clubs, ...clubSignals.map((club) => club.name)]);
+  const attended = db.prepare(`SELECT DISTINCT e.category, e.club_name FROM attendance_records ar
+    JOIN events e ON e.id = ar.event_id WHERE ar.account_id = ?`).all(req.account.id) as Array<{ category: string; club_name: string | null }>;
+  const attendedCategories = new Set(attended.map((item) => item.category));
+  const attendedClubs = new Set(attended.flatMap((item) => item.club_name ? [item.club_name] : []));
   const attendance = db.prepare(`
     SELECT DISTINCT e.category FROM attendance_history ah
     JOIN events e ON e.id = ah.event_id
     WHERE ah.check_in_count > 0 AND e.faculty = ?
   `).all(account.faculty) as Array<{ category: string }>;
-  const attendedCategories = new Set(attendance.map((item) => item.category));
+  attendance.forEach((item) => attendedCategories.add(item.category));
   const recommendations = rows.map((row) => {
     const reasons: string[] = [];
     let score = 0;
@@ -1363,9 +1694,13 @@ app.get('/api/recommendations', requireAuth, requireRole('student'), (req: Authe
       score += 25;
       reasons.push(`Relevant to ${account.faculty}`);
     }
-    if (row.club_name && clubs.includes(String(row.club_name))) {
+    if (row.club_name && clubNames.has(String(row.club_name))) {
       score += 25;
       reasons.push(`Connected to ${String(row.club_name)}`);
+    }
+    if (row.club_name && attendedClubs.has(String(row.club_name))) {
+      score += 15;
+      reasons.push('From a community you have attended before');
     }
     if (attendedCategories.has(String(row.category))) {
       score += 25;
