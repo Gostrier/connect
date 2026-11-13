@@ -26,7 +26,6 @@ describe('CampusConnect API', () => {
 
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'demo-wellness-break', category: 'Sports & Wellness' }),
-      expect.objectContaining({ id: 'demo-board-game-social', category: 'Clubs & Social' }),
       expect.objectContaining({ id: 'demo-portfolio-sprint', category: 'Career & Networking' }),
     ]));
   });

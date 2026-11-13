@@ -27,7 +27,6 @@ db.exec(`
     course TEXT,
     registration_no TEXT,
     interests TEXT NOT NULL DEFAULT '[]',
-    clubs TEXT NOT NULL DEFAULT '[]',
     personalization_enabled INTEGER NOT NULL DEFAULT 1,
     in_app_preferences TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
@@ -55,9 +54,7 @@ db.exec(`
     category TEXT NOT NULL,
     delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('in_person', 'online', 'hybrid')),
     faculty TEXT NOT NULL,
-    club_name TEXT,
-    club_id TEXT REFERENCES clubs(id),
-    event_scope TEXT NOT NULL DEFAULT 'faculty' CHECK (event_scope IN ('university', 'faculty', 'club')),
+    event_scope TEXT NOT NULL DEFAULT 'faculty' CHECK (event_scope IN ('university', 'faculty')),
     start_at TEXT NOT NULL,
     end_at TEXT NOT NULL,
     registration_closes_at TEXT NOT NULL,
@@ -106,6 +103,20 @@ db.exec(`
     PRIMARY KEY (event_id, account_id, kind)
   );
 
+  CREATE TABLE IF NOT EXISTS organizer_access_applications (
+    id TEXT PRIMARY KEY,
+    applicant_id TEXT NOT NULL REFERENCES accounts(id),
+    position TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn')),
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    reviewer_id TEXT REFERENCES accounts(id),
+    review_note TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS organizer_access_one_active_application
+    ON organizer_access_applications(applicant_id) WHERE status IN ('pending', 'approved');
+
   CREATE TABLE IF NOT EXISTS attendance_history (
     id TEXT PRIMARY KEY,
     event_id TEXT NOT NULL REFERENCES events(id),
@@ -135,80 +146,41 @@ db.exec(`
     UNIQUE (event_id, account_id)
   );
 
-  CREATE TABLE IF NOT EXISTS organizer_applications (
-    id TEXT PRIMARY KEY,
-    applicant_id TEXT NOT NULL REFERENCES accounts(id),
-    club_name TEXT NOT NULL,
-    club_key TEXT NOT NULL,
-    position TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'withdrawn')),
-    created_at TEXT NOT NULL,
-    reviewed_at TEXT,
-    reviewer_id TEXT REFERENCES accounts(id),
-    review_note TEXT
-  );
-  CREATE INDEX IF NOT EXISTS organizer_applications_club_status
-    ON organizer_applications(club_key, status);
 
-  CREATE TABLE IF NOT EXISTS clubs (
-    id TEXT PRIMARY KEY,
-    organizer_id TEXT NOT NULL REFERENCES accounts(id),
-    name TEXT NOT NULL,
-    category TEXT NOT NULL,
-    description TEXT NOT NULL,
-    vision TEXT NOT NULL,
-    mission TEXT NOT NULL,
-    logo TEXT,
-    contact_email TEXT NOT NULL,
-    contact_phone TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    submitted_at TEXT,
-    reviewed_at TEXT,
-    reviewer_id TEXT REFERENCES accounts(id),
-    review_note TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS clubs_organizer ON clubs(organizer_id);
-
-  CREATE TABLE IF NOT EXISTS club_memberships (
-    id TEXT PRIMARY KEY,
-    club_id TEXT NOT NULL REFERENCES clubs(id),
-    account_id TEXT NOT NULL REFERENCES accounts(id),
-    status TEXT NOT NULL CHECK (status IN ('pending', 'member', 'rejected')),
-    followed INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE (club_id, account_id)
-  );
-  CREATE INDEX IF NOT EXISTS club_memberships_account ON club_memberships(account_id, status, followed);
-
-  CREATE TABLE IF NOT EXISTS recurring_club_schedules (
-    id TEXT PRIMARY KEY,
-    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE UNIQUE,
-    room_id TEXT NOT NULL REFERENCES rooms(id),
-    weekdays TEXT NOT NULL,
-    start_time TEXT NOT NULL,
-    end_time TEXT NOT NULL,
-    effective_from TEXT NOT NULL,
-    effective_until TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS recurring_club_schedules_room ON recurring_club_schedules(room_id);
 `);
 
-const clubColumns = db.pragma('table_info(clubs)') as Array<{ name: string }>;
-if (!clubColumns.some((column) => column.name === 'status')) db.exec("ALTER TABLE clubs ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
-if (!clubColumns.some((column) => column.name === 'submitted_at')) db.exec('ALTER TABLE clubs ADD COLUMN submitted_at TEXT');
-if (!clubColumns.some((column) => column.name === 'reviewed_at')) db.exec('ALTER TABLE clubs ADD COLUMN reviewed_at TEXT');
-if (!clubColumns.some((column) => column.name === 'reviewer_id')) db.exec('ALTER TABLE clubs ADD COLUMN reviewer_id TEXT REFERENCES accounts(id)');
-if (!clubColumns.some((column) => column.name === 'review_note')) db.exec('ALTER TABLE clubs ADD COLUMN review_note TEXT');
+const legacyClubTables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('clubs', 'club_memberships', 'organizer_applications', 'recurring_club_schedules')").all() as Array<{ name: string }>;
+if (legacyClubTables.length) {
+  db.pragma('foreign_keys = OFF');
+  const existingEventColumns = db.pragma('table_info(events)') as Array<{ name: string }>;
+  const existingAccountColumns = db.pragma('table_info(accounts)') as Array<{ name: string }>;
+  if (existingEventColumns.some((column) => column.name === 'club_id')) {
+    db.exec("UPDATE events SET club_id = NULL, club_name = NULL, event_scope = CASE WHEN faculty = 'University-wide' THEN 'university' ELSE 'faculty' END");
+  }
+  if (existingEventColumns.some((column) => column.name === 'category')) {
+    db.exec("UPDATE events SET category = 'Arts & Culture' WHERE category = 'Clubs & Social'");
+  }
+  if (existingAccountColumns.some((column) => column.name === 'clubs')) {
+    db.exec("UPDATE accounts SET clubs = '[]'");
+  }
+  db.exec("UPDATE accounts SET interests = replace(interests, 'Clubs & Social', 'Arts & Culture')");
+  db.exec("DELETE FROM notifications WHERE kind IN ('organizer_application', 'club_review', 'club_status')");
+  db.exec(`
+    DROP TABLE IF EXISTS recurring_club_schedules;
+    DROP TABLE IF EXISTS club_memberships;
+    DROP TABLE IF EXISTS organizer_applications;
+    DROP TABLE IF EXISTS clubs;
+    CREATE TABLE clubs (id TEXT PRIMARY KEY);
+  `);
+  db.pragma('foreign_keys = ON');
+}
 
-const clubEventColumns = db.pragma('table_info(events)') as Array<{ name: string }>;
-if (!clubEventColumns.some((column) => column.name === 'club_id')) db.exec('ALTER TABLE events ADD COLUMN club_id TEXT REFERENCES clubs(id)');
-if (!clubEventColumns.some((column) => column.name === 'event_scope')) db.exec("ALTER TABLE events ADD COLUMN event_scope TEXT NOT NULL DEFAULT 'faculty'");
+const migratedEventColumns = db.pragma('table_info(events)') as Array<{ name: string }>;
+const remainingClubTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'clubs'").get();
+if (migratedEventColumns.some((column) => column.name === 'club_id') && !remainingClubTable) {
+  db.exec('CREATE TABLE clubs (id TEXT PRIMARY KEY)');
+}
+
 
 const eventColumns = db.pragma('table_info(events)') as Array<{ name: string }>;
 if (!eventColumns.some((column) => column.name === 'registration_capacity_custom')) {
@@ -269,19 +241,19 @@ db.exec(`
 const now = new Date();
 const insertAccount = db.prepare(`
   INSERT OR IGNORE INTO accounts
-    (id, email, display_name, password_hash, role, faculty, course, interests, clubs, created_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (id, email, display_name, password_hash, role, faculty, course, interests, created_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const demoPasswordHash = bcrypt.hashSync('CampusDemo!2026', 10);
 const demoAccounts = [
-  ['student@campusconnect.test', 'Nia Wanjiku', 'student', 'School of Computing', 'Information Technology', ['Academic & Research', 'Career & Networking'], ['Tech Society']],
-  ['organizer@campusconnect.test', 'Amani Otieno', 'organizer', 'School of Computing', 'Information Technology', ['Academic & Research'], ['Tech Society']],
-  ['admin@campusconnect.test', 'Campus Administrator', 'student', 'Campus Administration', 'Administration', [], []],
-  ['samira@campusconnect.test', 'Samira Kibet', 'student', 'School of Business', 'Entrepreneurship', ['Career & Networking', 'Clubs & Social'], ['Business Club']],
-  ['kiptoo@campusconnect.test', 'Kiptoo Maina', 'student', 'School of Health Sciences', 'Public Health', ['Community Service', 'Sports & Wellness'], ['Health Society']],
+  ['student@campusconnect.test', 'Nia Wanjiku', 'student', 'School of Computing', 'Information Technology', ['Academic & Research', 'Career & Networking']],
+  ['organizer@campusconnect.test', 'Amani Otieno', 'organizer', 'School of Computing', 'Information Technology', ['Academic & Research']],
+  ['admin@campusconnect.test', 'Campus Administrator', 'student', 'Campus Administration', 'Administration', []],
+  ['samira@campusconnect.test', 'Samira Kibet', 'student', 'School of Business', 'Entrepreneurship', ['Career & Networking']],
+  ['kiptoo@campusconnect.test', 'Kiptoo Maina', 'student', 'School of Health Sciences', 'Public Health', ['Community Service', 'Sports & Wellness']],
 ] as const;
 
-for (const [email, name, role, faculty, course, interests, clubs] of demoAccounts) {
+for (const [email, name, role, faculty, course, interests] of demoAccounts) {
   insertAccount.run(
     randomUUID(),
     email,
@@ -291,7 +263,6 @@ for (const [email, name, role, faculty, course, interests, clubs] of demoAccount
     faculty,
     course,
     JSON.stringify(interests),
-    JSON.stringify(clubs),
     now.toISOString(),
   );
 }
@@ -305,10 +276,10 @@ for (const email of configuredAdmins) enableAdmin.run(email);
 const organizer = db.prepare('SELECT id FROM accounts WHERE email = ?').get('organizer@campusconnect.test') as { id: string };
 const insertEvent = db.prepare(`
   INSERT OR IGNORE INTO events
-    (id, title, description, category, delivery_mode, faculty, club_name, start_at, end_at,
+    (id, title, description, category, delivery_mode, faculty, start_at, end_at,
      registration_closes_at, expected_attendance, registration_capacity, required_facilities,
      room_id, venue_label, meeting_url, status, organizer_id, is_demo, created_at, updated_at)
-  VALUES (?, ?, ?, ?, 'in_person', ?, ?, ?, ?, ?, ?, ?, '[]', NULL, ?, NULL, 'published', ?, 1, ?, ?)
+  VALUES (?, ?, ?, ?, 'in_person', ?, ?, ?, ?, ?, ?, '[]', NULL, ?, NULL, 'published', ?, 1, ?, ?)
 `);
 
 const sampleEvents = [
@@ -318,7 +289,6 @@ const sampleEvents = [
     description: 'A practical, beginner-friendly workshop on using AI thoughtfully in research, study, and student projects.',
     category: 'Academic & Research',
     faculty: 'School of Computing',
-    club: 'Tech Society',
     days: 3,
     startHour: 10,
     duration: 90,
@@ -332,7 +302,6 @@ const sampleEvents = [
     description: 'Bring a draft CV, meet volunteer mentors, and leave with a short, actionable improvement plan.',
     category: 'Career & Networking',
     faculty: 'School of Business',
-    club: 'Career Circle',
     days: 4,
     startHour: 14,
     duration: 60,
@@ -346,7 +315,6 @@ const sampleEvents = [
     description: 'Students share community health project methods and discuss practical ways to collaborate across disciplines.',
     category: 'Community Service',
     faculty: 'School of Health Sciences',
-    club: 'Health Society',
     days: 6,
     startHour: 11,
     duration: 75,
@@ -360,7 +328,6 @@ const sampleEvents = [
     description: 'An evening of student performances, creative showcases, and stories from across the campus community.',
     category: 'Arts & Culture',
     faculty: 'Campus-wide',
-    club: 'Arts Collective',
     days: 8,
     startHour: 18,
     duration: 120,
@@ -374,7 +341,6 @@ const sampleEvents = [
     description: 'Take a screen break and join a gentle, beginner-friendly stretch session led by the Wellness Circle.',
     category: 'Sports & Wellness',
     faculty: 'Campus-wide',
-    club: 'Wellness Circle',
     days: 5,
     startHour: 17,
     duration: 45,
@@ -386,9 +352,8 @@ const sampleEvents = [
     id: 'demo-board-game-social',
     title: 'Board Games & New Friends',
     description: 'Meet fellow students, learn a quick game, and spend a relaxed evening making new campus connections.',
-    category: 'Clubs & Social',
+    category: 'Arts & Culture',
     faculty: 'Campus-wide',
-    club: 'Student Community',
     days: 7,
     startHour: 16,
     duration: 90,
@@ -402,7 +367,6 @@ const sampleEvents = [
     description: 'Get practical feedback from peers and mentors as you shape a small project into a portfolio-ready story.',
     category: 'Career & Networking',
     faculty: 'School of Design',
-    club: 'Creative Careers Club',
     days: 9,
     startHour: 13,
     duration: 90,
@@ -424,7 +388,6 @@ for (const event of sampleEvents) {
     event.description,
     event.category,
     event.faculty,
-    event.club,
     start.toISOString(),
     end.toISOString(),
     closes.toISOString(),

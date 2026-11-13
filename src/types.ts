@@ -13,7 +13,6 @@ export interface Account {
   course: string | null;
   registrationNo: string | null;
   interests: string[];
-  clubs: string[];
   personalizationEnabled: boolean;
   inAppPreferences: Record<string, boolean>;
 }
@@ -25,12 +24,7 @@ export interface CampusEvent {
   category: string;
   deliveryMode: DeliveryMode;
   faculty: string;
-  clubName: string | null;
-  clubId: string | null;
-  eventScope: 'university' | 'faculty' | 'club';
-  recurringWeekdays: number[];
-  recurringStartTime: string | null;
-  recurringEndTime: string | null;
+  eventScope: 'university' | 'faculty';
   startAt: string;
   endAt: string;
   registrationClosesAt: string;
@@ -50,30 +44,6 @@ export interface CampusEvent {
   seatsAvailable: number;
   currentRegistrationStatus?: 'registered' | 'waitlisted' | 'cancelled' | null;
   currentWaitlistPosition?: number | null;
-}
-
-export interface CampusClub {
-  id: string;
-  name: string;
-  category: string;
-  description: string;
-  vision: string;
-  mission: string;
-  logo: string | null;
-  contactEmail: string;
-  contactPhone: string;
-  organizerId: string;
-  organizerName: string;
-  memberCount: number;
-  upcomingEvents: number;
-  activeEvents: number;
-  attendanceRate: number;
-  status: 'pending' | 'active' | 'rejected' | 'suspended';
-  submittedAt: string | null;
-  reviewedAt: string | null;
-  reviewNote: string | null;
-  membershipStatus: string | null;
-  followed: boolean;
 }
 
 export interface NotificationItem {
@@ -128,7 +98,6 @@ export const categories = [
   'Academic & Research',
   'Career & Networking',
   'Arts & Culture',
-  'Clubs & Social',
   'Sports & Wellness',
   'Community Service',
 ];

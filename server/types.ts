@@ -12,7 +12,6 @@ export interface Account {
   course: string | null;
   registrationNo: string | null;
   interests: string[];
-  clubs: string[];
   personalizationEnabled: boolean;
   inAppPreferences: Record<string, boolean>;
 }
@@ -24,12 +23,7 @@ export interface EventRecord {
   category: string;
   deliveryMode: 'in_person' | 'online' | 'hybrid';
   faculty: string;
-  clubName: string | null;
-  clubId: string | null;
-  eventScope: 'university' | 'faculty' | 'club';
-  recurringWeekdays: number[];
-  recurringStartTime: string | null;
-  recurringEndTime: string | null;
+  eventScope: 'university' | 'faculty';
   startAt: string;
   endAt: string;
   registrationClosesAt: string;

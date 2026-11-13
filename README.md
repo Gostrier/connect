@@ -21,7 +21,7 @@ Demo sign-in:
 | Organizer | `organizer@campusconnect.test` | `CampusDemo!2026` |
 | Administrator | `admin@campusconnect.test` | `CampusDemo!2026` |
 
-New accounts must provide a name, fictional email address ending in `.test`, faculty, course, password, and matching password confirmation. Students can apply for Organizer access from their dashboard; an administrator reviews the application. A local demo administrator is available with the credentials above. To use your own administrator accounts, create them normally and set `ADMIN_EMAILS` to their comma-separated emails before starting the app, for example: `ADMIN_EMAILS=admin@campusconnect.test npm run dev`. When set, this list replaces the default demo administrator. Existing accounts are enabled when the API starts; new accounts are enabled at signup. Administrators can manage users and rooms, review Organizer applications, and view reports.
+New accounts must provide a name, fictional email address ending in `.test`, faculty, course, password, and matching password confirmation. A local demo administrator is available with the credentials above. To use your own administrator accounts, create them normally and set `ADMIN_EMAILS` to their comma-separated emails before starting the app, for example: `ADMIN_EMAILS=admin@campusconnect.test npm run dev`. When set, this list replaces the default demo administrator. Existing accounts are enabled when the API starts; new accounts are enabled at signup. Administrators can manage users and rooms, and view reports.
 The local one-time Organizer invitation is `local-organizer-invite`. Set `ORGANIZER_INVITE_CODE` before starting the API to use a different local invitation.
 
 ## Checks
@@ -41,4 +41,4 @@ npm run lint
 - In-app notifications are stored locally. Web Push and SMS are not configured, and no external messages are sent.
 - Attendance check-in is available for registered students at in-person and hybrid events while the event is underway. The organizer opens and closes attendance; opening requires their device location and sets a 100 m check-in radius. Student location is checked for the request and not stored. Each check-in keeps the student's name, email, faculty, course, and check-in time for future reference, visible to that event's organizer. The room inventory has no verified coordinates yet, so the opening location is the temporary location reference.
 - Dates are presented in the `Africa/Nairobi` time zone.
-- Signup, Organizer applications, and local authentication are for this presentation prototype only. Do not use real student identities, passwords, production data, or deploy this as a university service.
+- Signup and local authentication are for this presentation prototype only. Do not use real student identities, passwords, production data, or deploy this as a university service.

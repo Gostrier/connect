@@ -51,7 +51,7 @@ A ranked suggestion for a room that is available, large enough for expected atte
 _Avoid_: Automatic booking
 
 **Recommendation score**:
-A transparent event match score based equally on interests, faculty or course, club membership, and previous attendance.
+A transparent event match score based on interests, faculty or course, and previous attendance.
 _Avoid_: AI confidence
 
 **Attendance estimate**:
