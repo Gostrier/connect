@@ -1610,8 +1610,8 @@ if (process.env.NODE_ENV !== 'test') {
 export { app };
 
 if (process.env.NODE_ENV !== 'test') {
-  const port = Number(process.env.API_PORT ?? 3001);
-  app.listen(port, '127.0.0.1', () => {
-    console.log(`CampusConnect API listening on http://127.0.0.1:${port}`);
+  const port = Number(process.env.PORT ?? process.env.API_PORT ?? 3001);
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`CampusConnect API listening on port ${port}`);
   });
 }
