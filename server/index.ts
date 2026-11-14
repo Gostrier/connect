@@ -7,6 +7,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { db, loadVerifiedRoomInventory } from './db.js';
 import type { Account, AccountRole, EventRecord } from './types.js';
+import { resolve } from 'node:path';
 
 if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
   throw new Error('JWT_SECRET must be set outside the local presentation environment.');
@@ -1595,6 +1596,18 @@ function deliverScheduledInAppNotifications(): void {
   sendOnce(reminderRows, 'event_reminder', (title) => `${title} is happening tomorrow.`);
   sendOnce(dueTodayRows, 'registration_close', (title) => `Registration for ${title} closes today.`);
 }
+
+app.use(express.static(resolve(process.cwd(), 'dist')));
+
+app.use((req, res, next) => {
+  if (req.method !== 'GET' || req.path.startsWith('/api/')) {
+    return next();
+  }
+
+  res.sendFile(resolve(process.cwd(), 'dist/index.html'), (error) => {
+    if (error) next(error);
+  });
+});
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error(error);
