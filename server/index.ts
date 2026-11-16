@@ -249,7 +249,7 @@ function notifyStudentsAboutRecommendedEvent(eventId: string): void {
 }
 
 const signupSchema = z.object({
-  email: z.string().email().max(120).refine((value) => value.toLowerCase().endsWith('.test'), 'Use a synthetic .test email for this presentation prototype.'),
+  email: z.string().email().max(120),
   displayName: z.string().trim().min(2).max(80),
   faculty: z.string().trim().min(1).max(120),
   course: z.string().trim().min(1).max(120),

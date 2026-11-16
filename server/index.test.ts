@@ -51,19 +51,17 @@ describe('CampusConnect API', () => {
     )).toBe(true);
   });
 
-  it('allows only synthetic test addresses to sign up', async () => {
-    const rejected = await request(app).post('/api/auth/signup').send({
-      displayName: 'Demo Student',
-      email: 'student@example.com',
-      password: 'A-long-demo-password',
-    });
+  it('allows valid email addresses from any domain to sign up', async () => {
     const accepted = await request(app).post('/api/auth/signup').send({
       displayName: 'Demo Student',
-      email: 'student-1@campusconnect.test',
+      email: 'student@example.com',
+      faculty: 'School of Computing',
+      course: 'Information Technology',
+      registrationNo: 'SIT/2026/001',
       password: 'A-long-demo-password',
+      confirmPassword: 'A-long-demo-password',
     });
 
-    expect(rejected.status).toBe(400);
     expect(accepted.status).toBe(201);
     expect(accepted.body.account.role).toBe('student');
     expect(accepted.headers['set-cookie'][0]).toContain('HttpOnly');

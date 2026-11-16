@@ -258,7 +258,7 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
         <h2 id="auth-title">{mode === 'login' ? 'Sign in to CampusConnect' : 'Create a student account'}</h2>
         <p className="muted">
           {mode === 'signup'
-            ? <>Create separate accounts with a different, unique fictional <code>.test</code> email and password for each one. Never use a real student identity.</>
+            ? <>Create an account with any valid email address. Each account needs a unique email and registration number.</>
             : <>Presentation prototype only. Sign in with the fictional <code>.test</code> email and password for your account.</>}
         </p>
         <form className="stack-form" onSubmit={submit}>
@@ -268,7 +268,7 @@ function AuthDialog({ initialMode, onClose, onSuccess }: {
             </label>
           )}
           <label>Email address
-            <input required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="you@campusconnect.test" autoComplete="email" />
+            <input required type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} placeholder="you@example.com" autoComplete="email" />
           </label>
           {mode === 'signup' && <>
             <label>Faculty
